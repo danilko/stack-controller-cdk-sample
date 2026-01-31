@@ -4,6 +4,8 @@ aws:
 
 services:
   api:
-    image: abc
+    image:
+      tag: 1.0
   batch:
-    image: def
+    image:
+      tag: 1.0

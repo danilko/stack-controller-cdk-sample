@@ -1,9 +1,3 @@
 aws:
   accountId: abacd
   region: us-west-2
-
-services:
-  api:
-    image: abc
-  batch:
-    image: def

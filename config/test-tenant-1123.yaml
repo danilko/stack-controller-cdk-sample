@@ -1,1 +1,9 @@
 tenantId: test-tenant-1123
+
+services:
+  api:
+    image:
+      tag: 1.0
+  batch:
+    image:
+      tag: 1.0

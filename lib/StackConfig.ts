@@ -4,12 +4,16 @@ export class AwsConfig {
   accountId: string
 }
 
+export class DockerImage {
+  tag: string
+}
+
 export class ApiServiceConfig {
-  image: string
+  image: DockerImage
 }
 
 export class BatchServiceConfig {
-  image: string
+  image: DockerImage
 }
 
 

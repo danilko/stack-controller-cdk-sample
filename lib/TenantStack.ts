@@ -11,6 +11,7 @@ import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as ecr from 'aws-cdk-lib/aws-ecr'
 import {aws_cloudfront_origins, aws_iam, CfnOutput, Duration, RemovalPolicy, StackProps} from "aws-cdk-lib";
 import {TenantStackConfig} from "./StackConfig";
 import {OriginAccessIdentity} from "aws-cdk-lib/aws-cloudfront";
@@ -105,6 +106,12 @@ export class TenantStack extends cdk.Stack {
       defaultDatabaseName: 'default',
     });
 
+    // import the ecr arn from exporting stack `share-service-stack`
+    const batchECR = ecr.Repository.fromRepositoryArn(
+      this, 'share-service-apiServiceECRArn', cdk.Fn.importValue('share-service-apiServiceECRArn'));
+    const apiECR = ecr.Repository.fromRepositoryArn(
+      this, 'share-service-batchServiceECRArn', cdk.Fn.importValue('share-service-batchServiceECRArn'));
+
     // ECS Fargate
     const ecsFargateCluster = new ecs.Cluster(this, `${tenantId}-cluster`, { vpc });
     const batchECSTaskDefinition = new ecs.FargateTaskDefinition(this, `${tenantId}-api-task`, {
@@ -112,6 +119,21 @@ export class TenantStack extends cdk.Stack {
       memoryLimitMiB: 512,
     });
 
+    // Add a container to the task definition using an image from a registry
+    const container = batchECSTaskDefinition.addContainer('AppContainer', {
+      // Use ecs.ContainerImage.fromRegistry() to specify the image
+      image: ecs.ContainerImage.fromEcrRepository(batchECR, tenantStackConfig.batchService.image.tag),
+      logging: ecs.AwsLogDriver.awsLogs({
+        streamPrefix: "app-logs",
+      }),
+      // Define port mappings if necessary
+      portMappings: [
+        {
+          containerPort: 80,
+          protocol: ecs.Protocol.TCP,
+        },
+      ],
+    });
 
     const batchECSFargateService = new ecs.FargateService(this, `${tenantId}-fargate-svc`, {
       cluster: ecsFargateCluster,
@@ -129,14 +151,11 @@ export class TenantStack extends cdk.Stack {
     }));
 
     // Lambda
-    const apiLambda = new lambda.Function(this, `${tenantId}-api-handler`, {
-      runtime: lambda.Runtime.PYTHON_3_11,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda_src'),
-      vpc,
-      environment: {
-        tenant_id: tenantId,
-      },
+    const apiLambda = new lambda.DockerImageFunction(this, `${tenantId}-api-handler`, {
+      code: lambda.DockerImageCode.fromEcr(apiECR, {
+        tagOrDigest:  tenantStackConfig.apiService.image.tag, // Specify the tag or digest
+      }),
+        functionName: 'MyContainerLambda',
     });
 
     apiLambda.role?.addToPrincipalPolicy(new iam.PolicyStatement({
