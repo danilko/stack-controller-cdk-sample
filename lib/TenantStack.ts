@@ -6,13 +6,12 @@ import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as rds from 'aws-cdk-lib/aws-rds';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
-import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as ecr from 'aws-cdk-lib/aws-ecr'
-import {aws_cloudfront_origins, aws_iam, CfnOutput, Duration, RemovalPolicy, StackProps} from "aws-cdk-lib";
+import {aws_cloudfront_origins, CfnOutput, Duration, RemovalPolicy, StackProps} from "aws-cdk-lib";
 import {TenantStackConfig} from "./StackConfig";
 import {OriginAccessIdentity} from "aws-cdk-lib/aws-cloudfront";
 
@@ -32,7 +31,45 @@ export class TenantStack extends cdk.Stack {
 
     // Networking
     const vpc = new ec2.Vpc(this, `${tenantId}-vpc`, {
+      natGateways: 0, // disable public access from NAT gateway for now
       maxAzs: 2,
+      subnetConfiguration: [
+        { name: 'public',
+          subnetType: ec2.SubnetType.PUBLIC,
+          cidrMask: 20 // 4,096 IPs for public (Load Balancers/NATs)
+        },
+        { name: 'private',
+          subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+          cidrMask: 20 // 4,096 IPs for private services
+        },
+      ],
+    });
+
+    // // Create the Bedrock Runtime VPC Endpoint (Interface Endpoint)
+    // vpc.addInterfaceEndpoint('bedrockRuntimeEndpoint', {
+    //   service: ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME,
+    //   privateDnsEnabled: true,
+    //   subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+    // });
+
+    vpc.addGatewayEndpoint('s3Endpoint', {
+      service: ec2.GatewayVpcEndpointAwsService.S3,
+    });
+
+    vpc.addInterfaceEndpoint('eventBridgeEndpoint', {
+      service: ec2.InterfaceVpcEndpointAwsService.EVENTBRIDGE,
+    });
+
+    vpc.addInterfaceEndpoint('cloudWatchLogsEndpoint', {
+      service: ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
+    });
+
+    vpc.addInterfaceEndpoint('cognitoIDPEndpoint', {
+      service: ec2.InterfaceVpcEndpointAwsService.COGNITO_IDP,
+    });
+
+    vpc.addInterfaceEndpoint('eCRDockerEndpoint', {
+      service: ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
     });
 
     // Security - WAF (Simplified HIPAA-like set)
@@ -76,7 +113,7 @@ export class TenantStack extends cdk.Stack {
     });
 
     const rawDataBucket = new s3.Bucket(this, `${tenantId}-raw-data-bucket`, {
-      bucketName: `${tenantId}-data`,
+      bucketName: `${tenantId}-raw-data`,
       encryptionKey: tenantKmsKey,
       objectOwnership: s3.ObjectOwnership.OBJECT_WRITER,
       publicReadAccess: false,
@@ -107,72 +144,80 @@ export class TenantStack extends cdk.Stack {
     });
 
     // import the ecr arn from exporting stack `share-service-stack`
-    const batchECR = ecr.Repository.fromRepositoryArn(
-      this, 'share-service-apiServiceECRArn', cdk.Fn.importValue('share-service-apiServiceECRArn'));
     const apiECR = ecr.Repository.fromRepositoryArn(
-      this, 'share-service-batchServiceECRArn', cdk.Fn.importValue('share-service-batchServiceECRArn'));
+      this, 'share-service-apiServiceECRArn', cdk.Fn.importValue('share-service-apiServiceECRArn'));
 
     // ECS Fargate
     const ecsFargateCluster = new ecs.Cluster(this, `${tenantId}-cluster`, { vpc });
-    const batchECSTaskDefinition = new ecs.FargateTaskDefinition(this, `${tenantId}-api-task`, {
+    const apiECSTaskDefinition = new ecs.FargateTaskDefinition(this, `${tenantId}-api-task`, {
       cpu: 256,
       memoryLimitMiB: 512,
     });
 
     // Add a container to the task definition using an image from a registry
-    const container = batchECSTaskDefinition.addContainer('AppContainer', {
+    const container = apiECSTaskDefinition.addContainer('AppContainer', {
       // Use ecs.ContainerImage.fromRegistry() to specify the image
-      image: ecs.ContainerImage.fromEcrRepository(batchECR, tenantStackConfig.batchService.image.tag),
+      image: ecs.ContainerImage.fromEcrRepository(apiECR, tenantStackConfig.apiService.image.tag),
       logging: ecs.AwsLogDriver.awsLogs({
-        streamPrefix: "app-logs",
+        streamPrefix: "api-task-logs",
       }),
-      // Define port mappings if necessary
       portMappings: [
         {
-          containerPort: 80,
+          containerPort: 8080,
           protocol: ecs.Protocol.TCP,
         },
       ],
     });
 
-    const batchECSFargateService = new ecs.FargateService(this, `${tenantId}-fargate-svc`, {
+    const apiECSFargateService = new ecs.FargateService(this, `${tenantId}-api-fargate-svc`, {
       cluster: ecsFargateCluster,
-      taskDefinition: batchECSTaskDefinition
+      taskDefinition: apiECSTaskDefinition,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      assignPublicIp: false // ensure stay in private
     });
 
-    batchECSFargateService.taskDefinition.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
+    apiECSFargateService.taskDefinition.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
       actions: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject'],
       resources: [dataBucket.bucketArn],
     }));
 
-    batchECSFargateService.taskDefinition.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
+    apiECSFargateService.taskDefinition.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
       actions: ['kms:Decrypt', 'kms:GenerateDataKey'], // Decrypt is needed for reading, GenerateDataKey for uploading
       resources: [tenantKmsKey.keyArn],
     }));
 
-    // Lambda
-    const apiLambda = new lambda.DockerImageFunction(this, `${tenantId}-api-handler`, {
-      code: lambda.DockerImageCode.fromEcr(apiECR, {
-        tagOrDigest:  tenantStackConfig.apiService.image.tag, // Specify the tag or digest
-      }),
-        functionName: 'MyContainerLambda',
-    });
-
-    apiLambda.role?.addToPrincipalPolicy(new iam.PolicyStatement({
-      actions: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject'],
-      resources: [dataBucket.bucketArn],
+    apiECSFargateService.taskDefinition.addToTaskRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock:InvokeModel',
+        'bedrock:InvokeModelWithResponseStream'
+      ],
+      resources: [
+        `arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0`,
+        `arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-3-haiku-20240307-v1:0`
+      ],
     }));
 
-    apiLambda.role?.addToPrincipalPolicy(new iam.PolicyStatement({
-      actions: ['kms:Decrypt', 'kms:GenerateDataKey'], // Decrypt is needed for reading, GenerateDataKey for uploading
-      resources: [tenantKmsKey.keyArn],
-    }));
 
-    // 8. Load Balancer (ALB)
-    const alb = new elbv2.ApplicationLoadBalancer(this, `${tenantId}-alb`, {
+    // Load Balancer (ALB)
+    const alb = new elbv2.ApplicationLoadBalancer(this, `${tenantId}-public-alb`, {
       vpc,
-      internetFacing: true,
+      internetFacing: true, // open to public
+      vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
     });
+    // Connect ALB to ECS
+    const listener = alb.addListener(`listener`, { port: 80 });
+
+    listener.addTargets('apiSvcTarget', {
+      port: 8080,
+      targets: [apiECSFargateService],
+      healthCheck: {
+        path: '/health', // Ensure your app has this endpoint!
+        interval: cdk.Duration.seconds(30),
+      },
+    });
+
+    apiECSFargateService.connections.allowFrom(alb, ec2.Port.tcp(8080));
 
     // Associate WAF
     new wafv2.CfnWebACLAssociation(this, `${tenantId}-waf-assoc`, {
@@ -276,7 +321,6 @@ export class TenantStack extends cdk.Stack {
     const signInUrl = userPoolDomain.signInUrl(frontendAppClient, {
       redirectUri: frontendOrigin, // must be a URL configured under 'callbackUrls' with the client
     });
-
 
     // Print output
     new CfnOutput(this, `${tenantId}-userPoolId`, { value: userPool.userPoolId });

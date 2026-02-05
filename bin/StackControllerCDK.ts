@@ -17,20 +17,41 @@ if (!tenantId) {
 }
 
 // Load Configuration
-const loadConfig = (tenantId: string):TenantStackConfig => {
+const loadConfig = (tenantId: string): TenantStackConfig => {
   const lowerTenantId = tenantId.toLowerCase();
-  const configPath = path.join(__dirname, '../config', `${lowerTenantId}.yaml`);
 
-  if (!fs.existsSync(configPath)) {
-    console.error(`Error: Config file for tenant ${lowerTenantId} not found at ${configPath}`);
-    process.exit(1);
-  }
+  const commonConfigPath = path.join(__dirname, '../config', `common.yaml`);
+
+  const tenantConfigPath = path.join(__dirname, '../config', `${lowerTenantId}.yaml`);
+
+  let finalConfig = {} as any;
 
   try {
-    const fileContents = fs.readFileSync(configPath, 'utf8');
-    return yaml.load(fileContents) as TenantStackConfig;
+    // Load Common Config (The Baseline)
+    if (fs.existsSync(commonConfigPath)) {
+      const commonContent = fs.readFileSync(commonConfigPath, 'utf8');
+      finalConfig = yaml.load(commonContent) || {};
+
+    } else {
+      console.warn(`Warning: common.yaml not found at ${commonConfigPath}`);
+    }
+
+    // Load tenant setting for override
+    if (fs.existsSync(tenantConfigPath)) {
+      const tenantContent = fs.readFileSync(tenantConfigPath, 'utf8');
+      const tenantConfig = yaml.load(tenantContent) as Record<string, any>;
+
+      // Merge: Tenant fields will overwrite common fields
+      finalConfig = {...finalConfig, ...tenantConfig};
+    } else {
+      console.error(`Error: Config file for tenant ${lowerTenantId} not found at ${tenantConfigPath}`);
+      process.exit(1);
+    }
+
+    return finalConfig as TenantStackConfig;
+
   } catch (e) {
-    console.error(`Error parsing YAML: ${e}`);
+    console.error(`Error parsing tenant config YAML: ${e}`);
     process.exit(1);
   }
 };
@@ -47,8 +68,7 @@ if (tenantId === 'share-service') {
   new ShareServiceStack(app, `share-service-stack`, tenantConfig, {
     env: targetEnv
   });
-}
-else{
+} else {
   new TenantStack(app, `${tenantId}-tenant-stack`, tenantConfig, {
     env: targetEnv
   });
