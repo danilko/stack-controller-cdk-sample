@@ -48,7 +48,11 @@ const loadConfig = (tenantId: string): TenantStackConfig => {
       process.exit(1);
     }
 
-    return finalConfig as TenantStackConfig;
+    const response = finalConfig as TenantStackConfig;
+
+    console.info(`Final Config: ${JSON.stringify(response)}`)
+
+    return response;
 
   } catch (e) {
     console.error(`Error parsing tenant config YAML: ${e}`);

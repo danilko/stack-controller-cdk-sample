@@ -12,14 +12,13 @@ export class ApiServiceConfig {
   image: DockerImage
 }
 
-export class BatchServiceConfig {
-  image: DockerImage
+export class Services {
+  api: ApiServiceConfig
 }
 
 
 export class TenantStackConfig {
   tenantId: string
   aws: AwsConfig
-  apiService: ApiServiceConfig
-  batchService:BatchServiceConfig
+  services: Services
 }

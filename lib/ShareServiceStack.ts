@@ -15,27 +15,24 @@ export class ShareServiceStack extends cdk.Stack {
     const shareServiceKmsKey = new kms.Key(this, `${tenantId}-key`, {
       alias: `alias/${tenantId}-key`,
       enableKeyRotation: true,
-      removalPolicy: cdk.RemovalPolicy.RETAIN, // Keep the key even if stack is deleted
-    });
-
-    const batchServiceECR = new ecr.Repository(this, `${tenantId}-batch-service`, {
-      repositoryName: `${tenantId}-batch-service`,
-      encryptionKey: shareServiceKmsKey,
-      imageScanOnPush: true, // Optional: enables image scanning on push
-      encryption: ecr.RepositoryEncryption.KMS,
-      removalPolicy: RemovalPolicy.DESTROY,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
     const apiServiceECR = new ecr.Repository(this, `${tenantId}-api-service`, {
       repositoryName: `${tenantId}-api-service`,
       encryptionKey: shareServiceKmsKey,
+      imageTagMutability: ecr.TagMutability.MUTABLE, // allow to push to same tag
       imageScanOnPush: true, // Optional: enables image scanning on push
       encryption: ecr.RepositoryEncryption.KMS,
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
 
-    new CfnOutput(this, "share-service-batchServiceECRArn", { value: batchServiceECR.repositoryArn , exportName: "share-service-batchServiceECRArn"});
     new CfnOutput(this, "share-service-apiServiceECRArn", { value: apiServiceECR.repositoryArn , exportName: "share-service-apiServiceECRArn"});
+    // Export the Name (Required to satisfy the late-binding error)
+    new cdk.CfnOutput(this, 'share-service-apiECRName', {value: apiServiceECR.repositoryName, exportName: 'share-service-apiServiceECRName',});
+
+    new CfnOutput(this, "share-service-apiServiceECRUri", { value: apiServiceECR.repositoryUri , exportName: "share-service-apiServiceECRUri"});
+
   }
 }
