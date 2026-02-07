@@ -29,6 +29,30 @@ export class TenantStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
+    // Allow the entire account to use this key,
+    // provided the IAM principal also has permissions.
+    tenantKmsKey.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'Enable IAM User Permissions',
+      effect: iam.Effect.ALLOW,
+      principals: [new iam.AccountRootPrincipal()], // Trust the account's IAM policies
+      actions: ['kms:*'],
+      resources: ['*'],
+    }));
+
+    // Specific ECR Service permission (Good for 2026 security standards)
+    tenantKmsKey.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'Allow ECR to use the key for decryption',
+      effect: iam.Effect.ALLOW,
+      principals: [new iam.ServicePrincipal('ecr.amazonaws.com')],
+      actions: [
+        'kms:Decrypt',
+        'kms:DescribeKey',
+        'kms:CreateGrant',
+        'kms:RetireGrant'
+      ],
+      resources: ['*'],
+    }));
+
     // Networking
     const vpc = new ec2.Vpc(this, `${tenantId}-vpc`, {
       natGateways: 0, // disable public access from NAT gateway for now
@@ -68,6 +92,11 @@ export class TenantStack extends cdk.Stack {
 
     vpc.addInterfaceEndpoint('cognitoIDPEndpoint', {
       service: ec2.InterfaceVpcEndpointAwsService.COGNITO_IDP,
+    });
+
+    // Need KMS for docker image
+    const kmsEndpoint = vpc.addInterfaceEndpoint('kmsEndpoint', {
+      service: ec2.InterfaceVpcEndpointAwsService.KMS,
     });
 
     // ECS Docker Image URI pull
@@ -151,6 +180,11 @@ export class TenantStack extends cdk.Stack {
     //   defaultDatabaseName: 'default',
     // });
 
+    const shareServiceKMSKey = kms.Key.fromKeyArn(
+      this, 'share-service-kmsKeyArn',
+      cdk.Fn.importValue('share-service-kmsKeyArn'),
+    )
+
     // import the ecr arn from exporting stack `share-service-stack`
     // need to use fromRepositoryAttributes with repositoryArn and repositoryName to satisfy late binding issue
     const apiServiceECR = ecr.Repository.fromRepositoryAttributes(
@@ -194,9 +228,10 @@ export class TenantStack extends cdk.Stack {
     // }));
 
     apiECSFargateService.taskDefinition.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
-      actions: ['kms:Decrypt', 'kms:GenerateDataKey'], // Decrypt is needed for reading, GenerateDataKey for uploading
-      resources: [tenantKmsKey.keyArn],
+      actions: ['kms:Decrypt', 'kms:DescribeKey', 'kms:CreateGrant', 'kms:RetireGrant', 'kms:GenerateDataKey'], // Decrypt is needed for reading, GenerateDataKey for uploading
+      resources: [tenantKmsKey.keyArn, shareServiceKMSKey.keyArn],
     }));
+
 
     apiECSFargateService.taskDefinition.addToTaskRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,

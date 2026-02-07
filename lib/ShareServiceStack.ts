@@ -3,6 +3,7 @@ import {CfnOutput, RemovalPolicy, StackProps} from 'aws-cdk-lib';
 import {Construct} from 'constructs';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as ecr from 'aws-cdk-lib/aws-ecr'
+import * as iam from 'aws-cdk-lib/aws-iam'
 import {TenantStackConfig} from "./StackConfig";
 
 const tenantId = 'share-service';
@@ -18,6 +19,30 @@ export class ShareServiceStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
+    // Allow the entire account to use this key,
+    // provided the IAM principal also has permissions.
+    shareServiceKmsKey.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'Enable IAM User Permissions',
+      effect: iam.Effect.ALLOW,
+      principals: [new iam.AccountRootPrincipal()], // Trust the account's IAM policies
+      actions: ['kms:*'],
+      resources: ['*'],
+    }));
+
+    // Specific ECR Service permission (Good for 2026 security standards)
+    shareServiceKmsKey.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'Allow ECR to use the key for decryption',
+      effect: iam.Effect.ALLOW,
+      principals: [new iam.ServicePrincipal('ecr.amazonaws.com')],
+      actions: [
+        'kms:Decrypt',
+        'kms:DescribeKey',
+        'kms:CreateGrant',
+        'kms:RetireGrant'
+      ],
+      resources: ['*'],
+    }));
+
     const apiServiceECR = new ecr.Repository(this, `${tenantId}-api-service`, {
       repositoryName: `${tenantId}-api-service`,
       encryptionKey: shareServiceKmsKey,
@@ -27,7 +52,7 @@ export class ShareServiceStack extends cdk.Stack {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
-
+    new CfnOutput(this, "share-service-kmsKeyArn", { value: shareServiceKmsKey.keyArn, exportName: "share-service-kmsKeyArn"});
     new CfnOutput(this, "share-service-apiServiceECRArn", { value: apiServiceECR.repositoryArn , exportName: "share-service-apiServiceECRArn"});
     // Export the Name (Required to satisfy the late-binding error)
     new cdk.CfnOutput(this, 'share-service-apiECRName', {value: apiServiceECR.repositoryName, exportName: 'share-service-apiServiceECRName',});
