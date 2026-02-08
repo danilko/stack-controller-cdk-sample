@@ -43,12 +43,21 @@ export class TenantStack extends cdk.Stack {
     tenantKmsKey.addToResourcePolicy(new iam.PolicyStatement({
       sid: 'Allow ECR to use the key for decryption',
       effect: iam.Effect.ALLOW,
-      principals: [new iam.ServicePrincipal('ecr.amazonaws.com')],
+      principals: [
+        new iam.ServicePrincipal('s3.amazonaws.com'),
+        new iam.ServicePrincipal('ecr.amazonaws.com'),
+        new iam.ServicePrincipal('ecs.amazonaws.com'),
+        new iam.ServicePrincipal(`logs.${this.region}.amazonaws.com`), // CloudWatch Logs
+        new iam.ServicePrincipal('sqs.amazonaws.com'),
+        new iam.ServicePrincipal('events.amazonaws.com'), // EventBridge
+        new iam.ServicePrincipal('rds.amazonaws.com'),
+      ],
       actions: [
+        'kms:Encrypt',
         'kms:Decrypt',
-        'kms:DescribeKey',
-        'kms:CreateGrant',
-        'kms:RetireGrant'
+        'kms:ReEncrypt*',
+        'kms:GenerateDataKey*',
+        'kms:DescribeKey'
       ],
       resources: ['*'],
     }));
@@ -78,15 +87,20 @@ export class TenantStack extends cdk.Stack {
       subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
     });
 
-    vpc.addGatewayEndpoint('s3Endpoint', {
+    const s3Endpoint = vpc.addGatewayEndpoint('s3Endpoint', {
       service: ec2.GatewayVpcEndpointAwsService.S3,
+    });
+
+    // Get the Prefix List ID for S3 through  CDK  automatically
+    const s3PrefixList = ec2.PrefixList.fromLookup(this, 'S3PrefixList', {
+      prefixListName: `com.amazonaws.${this.region}.s3`,
     });
 
     vpc.addInterfaceEndpoint('eventBridgeEndpoint', {
       service: ec2.InterfaceVpcEndpointAwsService.EVENTBRIDGE,
     });
 
-    vpc.addInterfaceEndpoint('cloudWatchLogsEndpoint', {
+    const cloudwatchLogsEndpoint = vpc.addInterfaceEndpoint('cloudWatchLogsEndpoint', {
       service: ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
     });
 
@@ -103,6 +117,11 @@ export class TenantStack extends cdk.Stack {
     const ecrDockerEndpoint = vpc.addInterfaceEndpoint('ecrDockerEndpoint', {
       service: ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
     });
+
+    // Need S3 gateway endpoint to be created for ecr docker image pull success
+    // But s3 gateway endpoint is not directly depend by any resources (as SG depends on prefix rather than resources),
+    // so need to explict call out the dependency for cloudformation to resolve correctly
+    ecrDockerEndpoint.node.addDependency(s3Endpoint);
 
     // Need by ECS to search for docker image
     const ecrEndpoint = vpc.addInterfaceEndpoint('ecrEndpoint', {
@@ -193,6 +212,12 @@ export class TenantStack extends cdk.Stack {
         repositoryName: cdk.Fn.importValue('share-service-apiServiceECRName')
       });
 
+    const apiSvcSG = new ec2.SecurityGroup(this, '${tenantId}-api-svc-sg', {
+      vpc,
+      allowAllOutbound: false, // disable default output
+      description: 'Security group for API service with restricted egress',
+    });
+
     // ECS Fargate
     const ecsFargateCluster = new ecs.Cluster(this, `${tenantId}-cluster`, { vpc });
     const apiECSTaskDefinition = new ecs.FargateTaskDefinition(this, `${tenantId}-api-task`, {
@@ -201,7 +226,7 @@ export class TenantStack extends cdk.Stack {
     });
 
     // Add a container to the task definition using an image from a registry
-    const container = apiECSTaskDefinition.addContainer('AppContainer', {
+    const container = apiECSTaskDefinition.addContainer('appContainer', {
       // Use ecs.ContainerImage.fromRegistry() to specify the image
       image: ecs.ContainerImage.fromEcrRepository(apiServiceECR, tenantStackConfig.services.api.image.tag),
       logging: ecs.AwsLogDriver.awsLogs({
@@ -219,8 +244,10 @@ export class TenantStack extends cdk.Stack {
       cluster: ecsFargateCluster,
       taskDefinition: apiECSTaskDefinition,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      assignPublicIp: false // ensure stay in private
+      assignPublicIp: false, // ensure stay in private
+      securityGroups: [apiSvcSG] // assign explict sg
     });
+
     //
     // apiECSFargateService.taskDefinition.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
     //   actions: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject'],
@@ -264,9 +291,15 @@ export class TenantStack extends cdk.Stack {
       },
     });
 
-    apiECSFargateService.connections.allowFrom(alb, ec2.Port.tcp(8080));
-    apiECSFargateService.connections.allowTo(ecrDockerEndpoint, ec2.Port.tcp(443));
-    apiECSFargateService.connections.allowTo(ecrEndpoint, ec2.Port.tcp(443));
+
+    apiSvcSG.connections.allowFrom(alb, ec2.Port.tcp(8080), 'Allow ingress connection from ALB');
+    apiSvcSG.connections.allowTo(ecrDockerEndpoint, ec2.Port.tcp(443), 'Allow egress to ECR Docker VPC endpoint');
+    apiSvcSG.connections.allowTo(ecrEndpoint, ec2.Port.tcp(443), 'Allow egress to ECR API VPC endpoint');
+    apiSvcSG.connections.allowTo(kmsEndpoint, ec2.Port.tcp(443), 'Allow egress to KMS VPC endpoint');
+    apiSvcSG.connections.allowTo(cloudwatchLogsEndpoint, ec2.Port.tcp(443), 'Allow egress to Cloudwatch Logs VPC endpoint');
+    apiSvcSG.addEgressRule(ec2.Peer.ipv4(vpc.vpcCidrBlock), ec2.Port.udp(53), 'Allow DNS lookups');
+    // Add an egress rule to allow HTTPS traffic to S3 using the prefix list
+    apiSvcSG.addEgressRule(ec2.Peer.prefixList(s3PrefixList.prefixListId), ec2.Port.tcp(443), 'Allow outbound HTTPS to S3 Gateway endpoint through prefix');
 
     // // Associate WAF
     // new wafv2.CfnWebACLAssociation(this, `${tenantId}-waf-assoc`, {
