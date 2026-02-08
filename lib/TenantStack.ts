@@ -10,7 +10,8 @@ import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import * as ecr from 'aws-cdk-lib/aws-ecr'
+import * as ecr from 'aws-cdk-lib/aws-ecr';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import {aws_cloudfront_origins, CfnOutput, Duration, RemovalPolicy, StackProps} from "aws-cdk-lib";
 import {TenantStackConfig} from "./StackConfig";
 import {OriginAccessIdentity} from "aws-cdk-lib/aws-cloudfront";
@@ -220,17 +221,26 @@ export class TenantStack extends cdk.Stack {
 
     // ECS Fargate
     const ecsFargateCluster = new ecs.Cluster(this, `${tenantId}-cluster`, { vpc });
-    const apiECSTaskDefinition = new ecs.FargateTaskDefinition(this, `${tenantId}-api-task`, {
+    const apiSvcECSTaskDefinition = new ecs.FargateTaskDefinition(this, `${tenantId}-api-svc-task`, {
       cpu: 256,
       memoryLimitMiB: 512,
     });
 
+
+    const apiSvcLogGroup = new logs.LogGroup(this, 'apiLogGroup', {
+      logGroupName: `/ecs/${tenantId}-api-service`,
+      encryptionKey: tenantKmsKey, // Enables the CMK encryption
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
     // Add a container to the task definition using an image from a registry
-    const container = apiECSTaskDefinition.addContainer('appContainer', {
+    const apiSvcContainer = apiSvcECSTaskDefinition.addContainer('api-svc-container', {
       // Use ecs.ContainerImage.fromRegistry() to specify the image
       image: ecs.ContainerImage.fromEcrRepository(apiServiceECR, tenantStackConfig.services.api.image.tag),
       logging: ecs.AwsLogDriver.awsLogs({
         streamPrefix: "api-task-logs",
+        logGroup: apiSvcLogGroup,
       }),
       portMappings: [
         {
@@ -242,7 +252,7 @@ export class TenantStack extends cdk.Stack {
 
     const apiECSFargateService = new ecs.FargateService(this, `${tenantId}-api-fargate-svc`, {
       cluster: ecsFargateCluster,
-      taskDefinition: apiECSTaskDefinition,
+      taskDefinition: apiSvcECSTaskDefinition,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       assignPublicIp: false, // ensure stay in private
       securityGroups: [apiSvcSG] // assign explict sg
