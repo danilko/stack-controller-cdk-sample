@@ -39,9 +39,9 @@ export class TenantStack extends cdk.Stack {
       resources: ['*'],
     }));
 
-    // Specific ECR Service permission (Good for 2026 security standards)
+    // Specific Service permission
     tenantKmsKey.addToResourcePolicy(new iam.PolicyStatement({
-      sid: 'Allow ECR to use the key for decryption',
+      sid: 'Allow AWS services to use the key for decryption',
       effect: iam.Effect.ALLOW,
       principals: [
         new iam.ServicePrincipal('s3.amazonaws.com'),
@@ -56,7 +56,7 @@ export class TenantStack extends cdk.Stack {
         'kms:Encrypt',
         'kms:Decrypt',
         'kms:ReEncrypt*',
-        'kms:GenerateDataKey*',
+        'kms:GenerateDataKey*', // for s3
         'kms:DescribeKey'
       ],
       resources: ['*'],

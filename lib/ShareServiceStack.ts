@@ -29,16 +29,25 @@ export class ShareServiceStack extends cdk.Stack {
       resources: ['*'],
     }));
 
-    // Specific ECR Service permission (Good for 2026 security standards)
+    // Specific AWS Service permission
     shareServiceKmsKey.addToResourcePolicy(new iam.PolicyStatement({
-      sid: 'Allow ECR to use the key for decryption',
+      sid: 'Allow AWS services to use the key for decryption',
       effect: iam.Effect.ALLOW,
-      principals: [new iam.ServicePrincipal('ecr.amazonaws.com')],
+      principals: [
+        new iam.ServicePrincipal('s3.amazonaws.com'),
+        new iam.ServicePrincipal('ecr.amazonaws.com'),
+        new iam.ServicePrincipal('ecs.amazonaws.com'),
+        new iam.ServicePrincipal(`logs.${this.region}.amazonaws.com`), // CloudWatch Logs
+        new iam.ServicePrincipal('sqs.amazonaws.com'),
+        new iam.ServicePrincipal('events.amazonaws.com'), // EventBridge
+        new iam.ServicePrincipal('rds.amazonaws.com'),
+      ],
       actions: [
+        'kms:Encrypt',
         'kms:Decrypt',
-        'kms:DescribeKey',
-        'kms:CreateGrant',
-        'kms:RetireGrant'
+        'kms:ReEncrypt*',
+        'kms:GenerateDataKey*', // for s3
+        'kms:DescribeKey'
       ],
       resources: ['*'],
     }));
