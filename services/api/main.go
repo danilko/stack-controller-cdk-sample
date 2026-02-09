@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/bytedance/gopkg/util/logger"
 	"net/http"
@@ -14,6 +15,10 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwt"
 	"golang.org/x/oauth2"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
+
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
 	// Replace "go-swagger-api" with your actual module name from go.mod
@@ -21,15 +26,25 @@ import (
 )
 
 var (
-	cognitoConfig *oauth2.Config
-	jwksCache     *jwk.Cache
-	cognitoIssuer string
+	cognitoConfig  *oauth2.Config
+	jwksCache      *jwk.Cache
+	cognitoIssuer  string
+	bedrockClient  *bedrockruntime.Client
+	bedrockModelId string
 )
 
 func init() {
 	region := os.Getenv("AWS_REGION")
 	userPoolID := os.Getenv("COGNITO_USER_POOL_ID")
 	cognitoDomain := os.Getenv("COGNITO_DOMAIN")
+
+	bedrockModelId = os.Getenv("BEDROCK_MODEL_ID")
+	// Initialize AWS Config once at startup
+	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(region))
+	if err != nil {
+		panic("unable to load SDK config")
+	}
+	bedrockClient = bedrockruntime.NewFromConfig(cfg)
 
 	cognitoIssuer = fmt.Sprintf("https://cognito-idp.%s.amazonaws.com/%s", region, userPoolID)
 	jwksURL := cognitoIssuer + "/.well-known/jwks.json"
@@ -63,6 +78,23 @@ type Health struct {
 	Health int `json:"health" example:"1"`
 }
 
+// Request body structure
+type PromptRequest struct {
+	Prompt string `json:"prompt" binding:"required"`
+}
+
+// Anthropic specific structures
+type AnthropicBody struct {
+	AnthropicVersion string    `json:"anthropic_version"`
+	MaxTokens        int       `json:"max_tokens"`
+	Messages         []Message `json:"messages"`
+}
+
+type Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
 // @title           Go Sample REST API
 // @version         1.0
 // @description     This is a sample server for a book management API.
@@ -83,13 +115,15 @@ func main() {
 		// 1. Public Routes
 		// Keep health checks public so the ALB/ECS can verify the container is alive
 		v1.GET("/health", GetHealth)
-
+		v1.GET("/ai/prompt", AskPrompt)
 		// 2. Protected Routes
 		// Create a sub-group that applies the middleware to everything inside the braces
 		authorized := v1.Group("/")
 		authorized.Use(AuthMiddleware())
 		{
 			authorized.GET("/books", GetBooks)
+			//authorized.GET("/ai/prompt", AskPrompt)
+
 			authorized.GET("/user/profile", GetUserProfile)
 			// Any route added here automatically requires a token
 		}
@@ -180,4 +214,44 @@ func GetUserProfile(c *gin.Context) {
 func GetHealth(c *gin.Context) {
 	health := Health{Health: 1}
 	c.JSON(http.StatusOK, health)
+}
+
+func AskPrompt(c *gin.Context) {
+	//var req PromptRequest
+	//if err := c.ShouldBindJSON(&req); err != nil {
+	//	c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+	//	return
+	//}
+
+	// Prepare Anthropic Payload
+	payload := AnthropicBody{
+		AnthropicVersion: "bedrock-2023-05-31",
+		MaxTokens:        1024,
+		Messages: []Message{
+			{Role: "user", Content: "Is google gemini winning over chatgpt?"},
+		},
+	}
+
+	payloadBytes, _ := json.Marshal(payload)
+
+	// Invoke Bedrock
+	output, err := bedrockClient.InvokeModel(context.TODO(), &bedrockruntime.InvokeModelInput{
+		ModelId:     aws.String(bedrockModelId),
+		ContentType: aws.String("application/json"),
+		Body:        payloadBytes,
+	})
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Parse Response (Simplified for this example)
+	var result map[string]interface{}
+	json.Unmarshal(output.Body, &result)
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":   "success",
+		"response": result["content"],
+	})
 }

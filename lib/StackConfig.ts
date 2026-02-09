@@ -10,6 +10,7 @@ export class DockerImage {
 
 export class ApiServiceConfig {
   image: DockerImage
+  bedrockModelId: string
 }
 
 export class Services {

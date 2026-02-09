@@ -4,3 +4,4 @@ services:
   api:
     image:
       tag: "1.0" # show override behavior
+    bedrockModelId: "anthropic.claude-3-sonnet-20240229-v1:0"

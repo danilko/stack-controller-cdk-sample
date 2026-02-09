@@ -12,7 +12,16 @@ import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as logs from 'aws-cdk-lib/aws-logs';
-import {aws_cloudfront_origins, CfnOutput, Duration, RemovalPolicy, SecretValue, StackProps, Tags} from "aws-cdk-lib";
+import {
+  aws_bedrock,
+  aws_cloudfront_origins,
+  CfnOutput,
+  Duration,
+  RemovalPolicy,
+  SecretValue,
+  StackProps,
+  Tags
+} from "aws-cdk-lib";
 import {TenantStackConfig} from "./StackConfig";
 import {OriginAccessIdentity} from "aws-cdk-lib/aws-cloudfront";
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager'
@@ -99,7 +108,7 @@ export class TenantStack extends cdk.Stack {
     });
 
     // Create the Bedrock Runtime VPC Endpoint (Interface Endpoint)
-    vpc.addInterfaceEndpoint('bedrockRuntimeEndpoint', {
+    const bedrockRuntimeEndpoint = vpc.addInterfaceEndpoint('bedrockRuntimeEndpoint', {
       service: ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME,
       privateDnsEnabled: true,
       subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
@@ -165,7 +174,7 @@ export class TenantStack extends cdk.Stack {
     // THis is not secure currently
     //const cognitoCallbackUrl = `http://${alb.loadBalancerDnsName}/callback`
     const cognitoCallbackUrl = `http://localhost:8080/callback`
-    
+
     // https://docs.aws.amazon.com/cdk/api/v1/docs/aws-cognito-readme.html
     // --------------------------------------------------------------------------------------
     // AWS Cognito pool for OAuth2 auth
@@ -249,6 +258,11 @@ export class TenantStack extends cdk.Stack {
     //       },
     //     },
     //   ],
+    // });
+    // // Associate WAF
+    // new wafv2.CfnWebACLAssociation(this, `${tenantId}-waf-assoc`, {
+    //   resourceArn: alb.loadBalancerArn,
+    //   webAclArn: waf.attrArn,
     // });
     //
     // // Storage - Customer Data S3
@@ -346,6 +360,7 @@ export class TenantStack extends cdk.Stack {
         "COGNITO_USER_POOL_ID": userPool.userPoolId,
         "COGNITO_DOMAIN": userPoolDomain.baseUrl(),
         "COGNITO_REDIRECT_URL": cognitoCallbackUrl,
+        "BEDROCK_MODEL_ID": tenantStackConfig.services.api.bedrockModelId
       },
       // Use secrets for sensitive data
       secrets: {
@@ -381,8 +396,7 @@ export class TenantStack extends cdk.Stack {
         'bedrock:InvokeModelWithResponseStream'
       ],
       resources: [
-        `arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0`,
-        `arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-3-haiku-20240307-v1:0`
+        `arn:aws:bedrock:${this.region}::foundation-model/${tenantStackConfig.services.api.bedrockModelId}`
       ],
     }));
 
@@ -404,15 +418,12 @@ export class TenantStack extends cdk.Stack {
     apiSvcSG.connections.allowTo(kmsEndpoint, ec2.Port.tcp(443), 'Allow egress to KMS VPC endpoint');
     apiSvcSG.connections.allowTo(cloudwatchLogsEndpoint, ec2.Port.tcp(443), 'Allow egress to Cloudwatch Logs VPC endpoint');
     apiSvcSG.connections.allowTo(secretManagerEndpoint, ec2.Port.tcp(443), 'Allow egress to Secret Manager VPC endpoint');
+    apiSvcSG.connections.allowTo(bedrockRuntimeEndpoint, ec2.Port.tcp(443), 'Allow egress to Bedrock Runtime VPC endpoint');
     apiSvcSG.addEgressRule(ec2.Peer.ipv4(vpc.vpcCidrBlock), ec2.Port.udp(53), 'Allow DNS lookups');
     // Add an egress rule to allow HTTPS traffic to S3 using the prefix list
     apiSvcSG.addEgressRule(ec2.Peer.prefixList(s3PrefixList.prefixListId), ec2.Port.tcp(443), 'Allow outbound HTTPS to S3 Gateway endpoint through prefix');
 
-    // // Associate WAF
-    // new wafv2.CfnWebACLAssociation(this, `${tenantId}-waf-assoc`, {
-    //   resourceArn: alb.loadBalancerArn,
-    //   webAclArn: waf.attrArn,
-    // });
+
     //
     // // Frontend - S3 + CloudFront
     // const frontendBucket = new s3.Bucket(this, `${tenantId}-frontend-bucket`, {
