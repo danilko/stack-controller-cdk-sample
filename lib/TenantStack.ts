@@ -12,9 +12,10 @@ import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as logs from 'aws-cdk-lib/aws-logs';
-import {aws_cloudfront_origins, CfnOutput, Duration, RemovalPolicy, StackProps} from "aws-cdk-lib";
+import {aws_cloudfront_origins, CfnOutput, Duration, RemovalPolicy, SecretValue, StackProps, Tags} from "aws-cdk-lib";
 import {TenantStackConfig} from "./StackConfig";
 import {OriginAccessIdentity} from "aws-cdk-lib/aws-cloudfront";
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager'
 
 
 export class TenantStack extends cdk.Stack {
@@ -22,6 +23,22 @@ export class TenantStack extends cdk.Stack {
     super(scope, id, props);
 
     const tenantId = tenantStackConfig.tenantId;
+
+    // import the ecr arn from exporting stack `share-service-stack`
+    const shareServiceKMSKey = kms.Key.fromKeyArn(
+      this, 'share-service-kmsKeyArn',
+      cdk.Fn.importValue('share-service-kmsKeyArn'),
+    )
+    // need to use fromRepositoryAttributes with repositoryArn and repositoryName to satisfy late binding issue
+    const apiServiceECR = ecr.Repository.fromRepositoryAttributes(
+      this, 'share-service-apiServiceECR',
+      {repositoryArn:cdk.Fn.importValue('share-service-apiServiceECRArn'),
+        repositoryName: cdk.Fn.importValue('share-service-apiServiceECRName')
+      });
+
+    // Apply to everything in the stack
+    Tags.of(this).add('tenantId', tenantId);
+
 
     // Encryption - Custom KMS Key
     const tenantKmsKey = new kms.Key(this, `${tenantId}-key`, {
@@ -129,6 +146,67 @@ export class TenantStack extends cdk.Stack {
       service: ec2.InterfaceVpcEndpointAwsService.ECR,
     });
 
+    // Need by ECS to get secret
+    const secretManagerEndpoint = vpc.addInterfaceEndpoint('secretManager', {
+      service: ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
+    });
+
+    // https://docs.aws.amazon.com/cdk/api/v1/docs/aws-cognito-readme.html
+    // --------------------------------------------------------------------------------------
+    // AWS Cognito pool for OAuth2 auth
+    // --------------------------------------------------------------------------------------
+    const userPool = new cognito.UserPool(this, `${tenantId}-userpool`, {
+      userPoolName: `${tenantId}-userpool`,
+      selfSignUpEnabled: true,
+      standardAttributes: {
+        email: {
+          required: true,
+          mutable: true
+        }
+      },
+      removalPolicy: RemovalPolicy.DESTROY,  // When the stack is destroyed, the pool and its info are also destroyed
+      userVerification: {
+        emailSubject: 'Verify your email for our website!',
+        emailBody: 'Thanks for signing up to our website! Your verification code is {####}',
+        emailStyle: cognito.VerificationEmailStyle.CODE,
+        smsMessage: 'Thanks for signing up to our website! Your verification code is {####}',
+      },
+      // https://docs.aws.amazon.com/cdk/api/v1/docs/aws-cognito-readme.html
+      signInAliases: {            // Allow email as sign up alias please note it can only be configured at initial setup
+        email: true
+      },
+      autoVerify: { email: true },  // Auto verify email
+      accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
+    });
+
+    // domain for cognito hosted endpoint
+    // currently use out of box domain from cognito
+    const userPoolDomain = userPool.addDomain(`${tenantId}-domain`, {
+      cognitoDomain: {
+        domainPrefix: `${tenantId}-${this.region}-app`,
+      }
+    });
+
+    const appSvcClient = userPool.addClient(`${tenantId}-appSvcClient`, {
+      oAuth: {
+        flows: {
+          authorizationCodeGrant: true, // Required for backend svc flow
+        },
+        scopes: [cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL, cognito.OAuthScope.PROFILE],
+        callbackUrls: ['http://localhost:8080/callback'], // Update for later usage
+      },
+      generateSecret: true,
+    });
+
+    const appSvcClientSecret = new secretsmanager.Secret(this, `${tenantId}-appSvcClientSecret`, {
+      secretObjectValue: {
+        // Map the Cognito values to keys inside the JSON secret
+        COGNITO_CLIENT_ID: SecretValue.unsafePlainText(appSvcClient.userPoolClientId),
+        COGNITO_CLIENT_SECRET: appSvcClient.userPoolClientSecret,
+      },
+      encryptionKey: tenantKmsKey,
+    });
+
     // // Security - WAF (Simplified HIPAA-like set)
     // const waf = new wafv2.CfnWebACL(this, `${tenantId}-waf`, {
     //   defaultAction: { allow: {} },
@@ -159,7 +237,7 @@ export class TenantStack extends cdk.Stack {
     // });
     //
     // // Storage - Customer Data S3
-    // const dataBucket = new s3.Bucket(this, `${tenantId}-data-bucket`, {
+    // const dataBucket = new s3.Bucket(this, `${tenantId}-${this.region}-data-bucket`, {
     //   bucketName: `${tenantId}-data`,
     //   encryptionKey: tenantKmsKey,
     //   objectOwnership: s3.ObjectOwnership.OBJECT_WRITER,
@@ -169,7 +247,7 @@ export class TenantStack extends cdk.Stack {
     //   removalPolicy: cdk.RemovalPolicy.RETAIN, // HIPAA Compliance practice
     // });
     //
-    // const rawDataBucket = new s3.Bucket(this, `${tenantId}-raw-data-bucket`, {
+    // const rawDataBucket = new s3.Bucket(this, `${tenantId}-${this.region}-raw-data-bucket`, {
     //   bucketName: `${tenantId}-raw-data`,
     //   encryptionKey: tenantKmsKey,
     //   objectOwnership: s3.ObjectOwnership.OBJECT_WRITER,
@@ -200,18 +278,7 @@ export class TenantStack extends cdk.Stack {
     //   defaultDatabaseName: 'default',
     // });
 
-    const shareServiceKMSKey = kms.Key.fromKeyArn(
-      this, 'share-service-kmsKeyArn',
-      cdk.Fn.importValue('share-service-kmsKeyArn'),
-    )
 
-    // import the ecr arn from exporting stack `share-service-stack`
-    // need to use fromRepositoryAttributes with repositoryArn and repositoryName to satisfy late binding issue
-    const apiServiceECR = ecr.Repository.fromRepositoryAttributes(
-      this, 'share-service-apiServiceECR',
-      {repositoryArn:cdk.Fn.importValue('share-service-apiServiceECRArn'),
-        repositoryName: cdk.Fn.importValue('share-service-apiServiceECRName')
-      });
 
     const apiSvcSG = new ec2.SecurityGroup(this, '${tenantId}-api-svc-sg', {
       vpc,
@@ -248,6 +315,27 @@ export class TenantStack extends cdk.Stack {
           protocol: ecs.Protocol.TCP,
         },
       ],
+      healthCheck: {
+        command: [
+          "CMD-SHELL",
+          "curl -f http://localhost:8080/api/v1/health || exit 1"
+        ],
+        // Configure health check parameters
+        interval: cdk.Duration.seconds(30), // How often to run the check
+        timeout: cdk.Duration.seconds(5),   // How long to wait for the command to finish
+        retries: 3,                         // Number of times to retry before marking as unhealthy
+        startPeriod: cdk.Duration.seconds(10), // Grace period for the container to start up
+      },
+      environment:{
+        "AWS_REGION": this.region,
+        "COGNITO_USER_POOL_ID": userPool.userPoolId,
+        "COGNITO_DOMAIN": userPoolDomain.baseUrl(),
+      },
+      // Use secrets for sensitive data
+      secrets: {
+        COGNITO_CLIENT_ID: ecs.Secret.fromSecretsManager(appSvcClientSecret, 'COGNITO_CLIENT_ID'),
+        COGNITO_CLIENT_SECRET: ecs.Secret.fromSecretsManager(appSvcClientSecret, 'COGNITO_CLIENT_SECRET'),
+      },
     });
 
     const apiECSFargateService = new ecs.FargateService(this, `${tenantId}-api-fargate-svc`, {
@@ -307,6 +395,7 @@ export class TenantStack extends cdk.Stack {
     apiSvcSG.connections.allowTo(ecrEndpoint, ec2.Port.tcp(443), 'Allow egress to ECR API VPC endpoint');
     apiSvcSG.connections.allowTo(kmsEndpoint, ec2.Port.tcp(443), 'Allow egress to KMS VPC endpoint');
     apiSvcSG.connections.allowTo(cloudwatchLogsEndpoint, ec2.Port.tcp(443), 'Allow egress to Cloudwatch Logs VPC endpoint');
+    apiSvcSG.connections.allowTo(secretManagerEndpoint, ec2.Port.tcp(443), 'Allow egress to Secret Manager VPC endpoint');
     apiSvcSG.addEgressRule(ec2.Peer.ipv4(vpc.vpcCidrBlock), ec2.Port.udp(53), 'Allow DNS lookups');
     // Add an egress rule to allow HTTPS traffic to S3 using the prefix list
     apiSvcSG.addEgressRule(ec2.Peer.prefixList(s3PrefixList.prefixListId), ec2.Port.tcp(443), 'Allow outbound HTTPS to S3 Gateway endpoint through prefix');
@@ -357,34 +446,8 @@ export class TenantStack extends cdk.Stack {
     //   allowedOrigins: [frontendOrigin],
     // });
     //
-    //
-    // // https://docs.aws.amazon.com/cdk/api/v1/docs/aws-cognito-readme.html
-    // // --------------------------------------------------------------------------------------
-    // // AWS Cognito pool for OAuth2 auth
-    // // --------------------------------------------------------------------------------------
-    // const userPool = new cognito.UserPool(this, `${tenantId}-userpool`, {
-    //   userPoolName: `${tenantId}-userpool`,
-    //   selfSignUpEnabled: true,
-    //   standardAttributes: {
-    //     email: {
-    //       required: true,
-    //       mutable: true
-    //     }
-    //   },
-    //   removalPolicy: RemovalPolicy.DESTROY,  // When the stack is destroyed, the pool and its info are also destroyed
-    //   userVerification: {
-    //     emailSubject: 'Verify your email for our website!',
-    //     emailBody: 'Thanks for signing up to our website! Your verification code is {####}',
-    //     emailStyle: cognito.VerificationEmailStyle.CODE,
-    //     smsMessage: 'Thanks for signing up to our website! Your verification code is {####}',
-    //   },
-    //   // https://docs.aws.amazon.com/cdk/api/v1/docs/aws-cognito-readme.html
-    //   signInAliases: {            // Allow email as sign up alias please note it can only be configured at initial setup
-    //     email: true
-    //   },
-    //   autoVerify: { email: true },  // Auto verify email
-    //   accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
-    // });
+
+
     //
     // // Setup a client for website client
     // const frontendAppClient = userPool.addClient('frontend-client', {
@@ -401,13 +464,6 @@ export class TenantStack extends cdk.Stack {
     //   }
     // });
     //
-    // // domain for cognito hosted endpoint
-    // // currently use out of box domain from cognito
-    // const userPoolDomain = userPool.addDomain(`${tenantId}-domain`, {
-    //   cognitoDomain: {
-    //     domainPrefix: `${tenantId}-app`,
-    //   }
-    // });
     //
     // // Setup login Url
     // const signInUrl = userPoolDomain.signInUrl(frontendAppClient, {

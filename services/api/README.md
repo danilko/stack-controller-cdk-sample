@@ -12,6 +12,8 @@ swag init
 # Build the static binary
 CGO_ENABLED=0 GOOS=linux go build -o main .
 
+
+
 ```
 
 ## Docker image build
