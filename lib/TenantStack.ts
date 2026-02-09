@@ -151,6 +151,21 @@ export class TenantStack extends cdk.Stack {
       service: ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
     });
 
+
+    // Load Balancer (ALB)
+    const alb = new elbv2.ApplicationLoadBalancer(this, `${tenantId}-public-alb`, {
+      vpc,
+      internetFacing: true, // open to public
+      vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
+    });
+    // Connect ALB to ECS
+    const listener = alb.addListener(`listener`, { port: 80 });
+
+    // TODO: Update to HTTPS url once have proper domain and cert
+    // THis is not secure currently
+    //const cognitoCallbackUrl = `http://${alb.loadBalancerDnsName}/callback`
+    const cognitoCallbackUrl = `http://localhost:8080/callback`
+    
     // https://docs.aws.amazon.com/cdk/api/v1/docs/aws-cognito-readme.html
     // --------------------------------------------------------------------------------------
     // AWS Cognito pool for OAuth2 auth
@@ -193,7 +208,7 @@ export class TenantStack extends cdk.Stack {
           authorizationCodeGrant: true, // Required for backend svc flow
         },
         scopes: [cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL, cognito.OAuthScope.PROFILE],
-        callbackUrls: ['http://localhost:8080/callback'], // Update for later usage
+        callbackUrls: [cognitoCallbackUrl], // Update for later usage
       },
       generateSecret: true,
     });
@@ -330,6 +345,7 @@ export class TenantStack extends cdk.Stack {
         "AWS_REGION": this.region,
         "COGNITO_USER_POOL_ID": userPool.userPoolId,
         "COGNITO_DOMAIN": userPoolDomain.baseUrl(),
+        "COGNITO_REDIRECT_URL": cognitoCallbackUrl,
       },
       // Use secrets for sensitive data
       secrets: {
@@ -371,14 +387,6 @@ export class TenantStack extends cdk.Stack {
     }));
 
 
-    // Load Balancer (ALB)
-    const alb = new elbv2.ApplicationLoadBalancer(this, `${tenantId}-public-alb`, {
-      vpc,
-      internetFacing: true, // open to public
-      vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
-    });
-    // Connect ALB to ECS
-    const listener = alb.addListener(`listener`, { port: 80 });
 
     listener.addTargets('apiSvcTarget', {
       port: 8080,

@@ -37,7 +37,7 @@ func init() {
 	cognitoConfig = &oauth2.Config{
 		ClientID:     os.Getenv("COGNITO_CLIENT_ID"),
 		ClientSecret: os.Getenv("COGNITO_CLIENT_SECRET"),
-		RedirectURL:  "http://localhost:8080/callback",
+		RedirectURL:  os.Getenv("COGNITO_REDIRECT_URL"),
 		Scopes:       []string{"openid", "email", "profile"},
 		Endpoint: oauth2.Endpoint{
 			AuthURL:  cognitoDomain + "/oauth2/authorize",
