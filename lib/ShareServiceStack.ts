@@ -20,8 +20,8 @@ export class ShareServiceStack extends cdk.Stack {
     Tags.of(this).add('environment', tenantStackConfig.environment);
 
     // Encryption - Custom KMS Key
-    const shareServiceKmsKey = new kms.Key(this, `${tenantId}-key`, {
-      alias: `alias/${tenantId}-key`,
+    const shareServiceKmsKey = new kms.Key(this, `${tenantId}-${environment}-key`, {
+      alias: `alias/${tenantId}-${environment}-key`,
       enableKeyRotation: true,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
@@ -59,21 +59,23 @@ export class ShareServiceStack extends cdk.Stack {
       resources: ['*'],
     }));
 
-    const apiServiceECR = new ecr.Repository(this, `${tenantId}-api-service`, {
-      repositoryName: `${tenantId}-api-service`,
+    const apiServiceECR = new ecr.Repository(this, `${tenantId}-${environment}-apiSvc`, {
+      repositoryName: `${tenantId}-${environment}-api-svc`,
       encryptionKey: shareServiceKmsKey,
       imageTagMutability: ecr.TagMutability.MUTABLE, // allow to push to same tag
       imageScanOnPush: true, // Optional: enables image scanning on push
       encryption: ecr.RepositoryEncryption.KMS,
       removalPolicy: RemovalPolicy.DESTROY,
+      // Configure AWS to automatically clear out all images before attempting deletion
+      emptyOnDelete: true,
     });
 
     new CfnOutput(this, `${tenantId}-${environment}-kmsKeyArn`, { value: shareServiceKmsKey.keyArn, exportName: `${tenantId}-${environment}-kmsKeyArn`});
-    new CfnOutput(this,  `${tenantId}-${environment}-apiServiceECRArn`, { value: apiServiceECR.repositoryArn , exportName: `${tenantId}-${environment}-apiServiceECRArn`});
+    new CfnOutput(this,  `${tenantId}-${environment}-apiSvcECRArn`, { value: apiServiceECR.repositoryArn , exportName: `${tenantId}-${environment}-apiSvcECRArn`});
     // Export the Name (Required to satisfy the late-binding error)
-    new cdk.CfnOutput(this, `${tenantId}-${environment}-apiServiceECRName`, {value: apiServiceECR.repositoryName, exportName: `${tenantId}-${environment}-apiServiceECRName`});
+    new cdk.CfnOutput(this, `${tenantId}-${environment}-apiSvcECRName`, {value: apiServiceECR.repositoryName, exportName: `${tenantId}-${environment}-apiSvcECRName`});
 
-    new CfnOutput(this, `${tenantId}-${environment}-apiServiceECRUri`, { value: apiServiceECR.repositoryUri , exportName: `${tenantId}-${environment}-apiServiceECRUri`});
+    new CfnOutput(this, `${tenantId}-${environment}-apiSvcECRUri`, { value: apiServiceECR.repositoryUri , exportName: `${tenantId}-${environment}-apiSvcECRUri`});
 
   }
 }

@@ -1,10 +1,10 @@
 aws:
-  accountId: <aws account id>
+  accountId: "<aws account>"
   region: us-west-2
 
 tenantId: ""
 environment: "dev"
-
+publicCertArn: ""
 services:
   api:
     image:

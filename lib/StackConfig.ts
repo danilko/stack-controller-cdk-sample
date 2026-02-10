@@ -22,6 +22,7 @@ export class Services {
 export class TenantStackConfig {
   tenantId: string
   environment: string
+  publicCertArn: string
   aws: AwsConfig
   services: Services
 }

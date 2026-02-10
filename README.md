@@ -1,5 +1,11 @@
 # A Sample to demo ability to manage share service and multi tenant stacks through one set of CDK
 
+Overall Setup Flow
+![multi-tenants-stack-setup.drawio.png](diagrams/multi-tenants-stack-setup.drawio.png)
+
+Upload flow
+![upload-flow.drawio.png](diagrams/upload-flow.drawio.png)
+
 # STILL NOT STABLE, DO NOT USE IN PRODUCTION AS IS
 
 Utilize layers of config
@@ -11,6 +17,31 @@ config
     |_test-tenant-1123.yaml -> example tenant stack config, inherit any common if not override
 ```
 
+## Requirements
+1. Install [AWS CDK](https://docs.aws.amazon.com/cdk/v2/guide/getting-started.html)
+2. INstall AWS CLIBelow utilize a self-signed cert
+
+## Setup Steps
+
+1. Create self-signed cert, or import a proper cert
+```bash
+# Generate a private key
+openssl genrsa -out private.key 2048
+
+# Create the self-signed certificate (valid for 365 days)
+# Note: You can leave the prompts blank, but set 'Common Name' to your ALB DNS if known, or just 'test.com'
+openssl req -new -x509 -key private.key -out certificate.crt -days 365
+
+# install cert into aws account
+aws acm import-certificate --certificate fileb://certificate.crt --private-key fileb://private.key
+
+```
+2. Copy the output above into `config/dev/test-tenant-1123.yaml` into `publicCertArn` field like below
+```yaml
+publicCertArn: "arn:aws:acm:us-west-2:122212112:certificate/fda5d3b0-fcde-43b2-2224-1be55d5ceae2"
+```
+
+3. Setup share service and deploy docker images into ecr
 ```bash
 # first deploy share service (please ensure to update all config in common folder)
 cdk deploy -c tenantId=share-service
@@ -32,9 +63,10 @@ docker tag api-al2023:latest 111116177016.dkr.ecr.us-west-2.amazonaws.com/share-
 docker push 111116177016.dkr.ecr.us-west-2.amazonaws.com/share-service-dev-api-service:1.0
 # back to root
 cd ../../
+```
 
-
-# deploy one of tenant 
+4. Deploy one of tenant 
+```bash
 cdk deploy -c tenantId=test-tenant-1123.yaml
 ```
 

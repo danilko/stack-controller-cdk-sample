@@ -25,7 +25,7 @@ import {
 import {SHARE_SERVICE_TENANT_ID, TenantStackConfig} from "./StackConfig";
 import {OriginAccessIdentity} from "aws-cdk-lib/aws-cloudfront";
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager'
-
+import * as certificatemanager from 'aws-cdk-lib/aws-certificatemanager'
 
 export class TenantStack extends cdk.Stack {
   constructor(scope: Construct, id: string, tenantStackConfig: TenantStackConfig, props: StackProps) {
@@ -40,10 +40,10 @@ export class TenantStack extends cdk.Stack {
       cdk.Fn.importValue(`${SHARE_SERVICE_TENANT_ID}-${environment}-kmsKeyArn`),
     )
     // need to use fromRepositoryAttributes with repositoryArn and repositoryName to satisfy late binding issue
-    const apiServiceECR = ecr.Repository.fromRepositoryAttributes(
-      this, `${SHARE_SERVICE_TENANT_ID}-${environment}-apiServiceECR`,
-      {repositoryArn:cdk.Fn.importValue(`${SHARE_SERVICE_TENANT_ID}-${environment}-apiServiceECRArn`),
-        repositoryName: cdk.Fn.importValue(`${SHARE_SERVICE_TENANT_ID}-${environment}-apiServiceECRName`)
+    const apiSvcECR = ecr.Repository.fromRepositoryAttributes(
+      this, `${SHARE_SERVICE_TENANT_ID}-${environment}-apiSvcECR`,
+      {repositoryArn:cdk.Fn.importValue(`${SHARE_SERVICE_TENANT_ID}-${environment}-apiSvcECRArn`),
+        repositoryName: cdk.Fn.importValue(`${SHARE_SERVICE_TENANT_ID}-${environment}-apiSvcECRName`)
       });
 
     // Apply to everything in the stack
@@ -92,7 +92,7 @@ export class TenantStack extends cdk.Stack {
     }));
 
     // Networking
-    const vpc = new ec2.Vpc(this, `${tenantId}-vpc`, {
+    const vpc = new ec2.Vpc(this, `${tenantId}-${environment}-vpc`, {
       natGateways: 0, // disable public access from NAT gateway for now
       maxAzs: 2,
       enableDnsSupport: true, // explict set to allow VPC/Gateway endpoint resolution
@@ -110,40 +110,40 @@ export class TenantStack extends cdk.Stack {
     });
 
     // Create the Bedrock Runtime VPC Endpoint (Interface Endpoint)
-    const bedrockRuntimeEndpoint = vpc.addInterfaceEndpoint('bedrockRuntimeEndpoint', {
+    const bedrockRuntimeEndpoint = vpc.addInterfaceEndpoint(`${tenantId}-${environment}-bedrockRuntimeEndpoint`, {
       service: ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME,
       privateDnsEnabled: true,
       subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
     });
 
-    const s3Endpoint = vpc.addGatewayEndpoint('s3Endpoint', {
+    const s3Endpoint = vpc.addGatewayEndpoint(`${tenantId}-${environment}-s3Endpoint`, {
       service: ec2.GatewayVpcEndpointAwsService.S3,
     });
 
     // Get the Prefix List ID for S3 through  CDK  automatically
-    const s3PrefixList = ec2.PrefixList.fromLookup(this, 'S3PrefixList', {
+    const s3PrefixList = ec2.PrefixList.fromLookup(this, `${tenantId}-${environment}-s3PrefixList`, {
       prefixListName: `com.amazonaws.${this.region}.s3`,
     });
 
-    vpc.addInterfaceEndpoint('eventBridgeEndpoint', {
+    vpc.addInterfaceEndpoint(`${tenantId}-${environment}-eventBridgeEndpoint`, {
       service: ec2.InterfaceVpcEndpointAwsService.EVENTBRIDGE,
     });
 
-    const cloudwatchLogsEndpoint = vpc.addInterfaceEndpoint('cloudWatchLogsEndpoint', {
+    const cloudwatchLogsEndpoint = vpc.addInterfaceEndpoint(`${tenantId}-${environment}-cloudWatchLogsEndpoint`, {
       service: ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
     });
 
-    vpc.addInterfaceEndpoint('cognitoIDPEndpoint', {
+    vpc.addInterfaceEndpoint(`${tenantId}-${environment}-cognitoIDPEndpoint`, {
       service: ec2.InterfaceVpcEndpointAwsService.COGNITO_IDP,
     });
 
     // Need KMS for docker image
-    const kmsEndpoint = vpc.addInterfaceEndpoint('kmsEndpoint', {
+    const kmsEndpoint = vpc.addInterfaceEndpoint(`${tenantId}-${environment}-kmsEndpoint`, {
       service: ec2.InterfaceVpcEndpointAwsService.KMS,
     });
 
     // ECS Docker Image URI pull
-    const ecrDockerEndpoint = vpc.addInterfaceEndpoint('ecrDockerEndpoint', {
+    const ecrDockerEndpoint = vpc.addInterfaceEndpoint(`${tenantId}-${environment}-ecrDockerEndpoint`, {
       service: ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
     });
 
@@ -153,36 +153,53 @@ export class TenantStack extends cdk.Stack {
     ecrDockerEndpoint.node.addDependency(s3Endpoint);
 
     // Need by ECS to search for docker image
-    const ecrEndpoint = vpc.addInterfaceEndpoint('ecrEndpoint', {
+    const ecrEndpoint = vpc.addInterfaceEndpoint(`${tenantId}-${environment}-ecrEndpoint`, {
       service: ec2.InterfaceVpcEndpointAwsService.ECR,
     });
 
     // Need by ECS to get secret
-    const secretManagerEndpoint = vpc.addInterfaceEndpoint('secretManager', {
+    const secretManagerEndpoint = vpc.addInterfaceEndpoint(`${tenantId}-${environment}-secretManager`, {
       service: ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
     });
 
+    // Reference the imported certificate by ARN
+    const certificate = certificatemanager.Certificate.fromCertificateArn(
+      this,
+      `${tenantId}-${environment}-selfSignedCert`,
+      tenantStackConfig.publicCertArn
+    );
+
+    const albSG = new ec2.SecurityGroup(this, `${tenantId}-${environment}-alb-sg`, {
+      vpc,
+      description: 'Security group for ALB to perform finite control when necessary',
+    });
 
     // Load Balancer (ALB)
-    const alb = new elbv2.ApplicationLoadBalancer(this, `${tenantId}-public-alb`, {
+    const alb = new elbv2.ApplicationLoadBalancer(this, `${tenantId}-${environment}-pub-alb`, {
       vpc,
       internetFacing: true, // open to public
       vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
+      securityGroup: albSG,
     });
+
     // Connect ALB to ECS
-    const listener = alb.addListener(`listener`, { port: 80 });
+    const listener = alb.addListener(`${tenantId}-${environment}-pubAlbListener`, {
+      port: 443,
+      // This allows the ALB to accept the self-signed cert
+      certificates: [certificate],
+      sslPolicy: elbv2.SslPolicy.RECOMMENDED_TLS,});
 
     // TODO: Update to HTTPS url once have proper domain and cert
     // THis is not secure currently
-    //const cognitoCallbackUrl = `http://${alb.loadBalancerDnsName}/callback`
-    const cognitoCallbackUrl = `http://localhost:8080/callback`
+    const apiSvcUrl = `https://${alb.loadBalancerDnsName}`
+    const cognitoCallbackUrl = `${apiSvcUrl}/callback`
 
     // https://docs.aws.amazon.com/cdk/api/v1/docs/aws-cognito-readme.html
     // --------------------------------------------------------------------------------------
     // AWS Cognito pool for OAuth2 auth
     // --------------------------------------------------------------------------------------
-    const userPool = new cognito.UserPool(this, `${tenantId}-userpool`, {
-      userPoolName: `${tenantId}-userpool`,
+    const userPool = new cognito.UserPool(this, `${tenantId}-${environment}-userpool`, {
+      userPoolName: `${tenantId}-${environment}-userpool`,
       selfSignUpEnabled: true,
       standardAttributes: {
         email: {
@@ -207,13 +224,13 @@ export class TenantStack extends cdk.Stack {
 
     // domain for cognito hosted endpoint
     // currently use out of box domain from cognito
-    const userPoolDomain = userPool.addDomain(`${tenantId}-domain`, {
+    const userPoolDomain = userPool.addDomain(`${tenantId}-${environment}-domain`, {
       cognitoDomain: {
-        domainPrefix: `${tenantId}-${environment}-${this.region}-app`,
+        domainPrefix: `${tenantId}-${environment}-${this.region}-domain`,
       }
     });
 
-    const appSvcClient = userPool.addClient(`${tenantId}-${environment}-appSvcClient`, {
+    const apiSvcClient = userPool.addClient(`${tenantId}-${environment}-apiSvcClient`, {
       oAuth: {
         flows: {
           authorizationCodeGrant: true, // Required for backend svc flow
@@ -224,11 +241,11 @@ export class TenantStack extends cdk.Stack {
       generateSecret: true,
     });
 
-    const appSvcClientSecret = new secretsmanager.Secret(this, `${tenantId}-${environment}-appSvcClientSecret`, {
+    const apiSvcClientSecret = new secretsmanager.Secret(this, `${tenantId}-${environment}-apiSvcClientSecret`, {
       secretObjectValue: {
         // Map the Cognito values to keys inside the JSON secret
-        COGNITO_CLIENT_ID: SecretValue.unsafePlainText(appSvcClient.userPoolClientId),
-        COGNITO_CLIENT_SECRET: appSvcClient.userPoolClientSecret,
+        COGNITO_CLIENT_ID: SecretValue.unsafePlainText(apiSvcClient.userPoolClientId),
+        COGNITO_CLIENT_SECRET: apiSvcClient.userPoolClientSecret,
       },
       encryptionKey: tenantKmsKey,
     });
@@ -311,7 +328,7 @@ export class TenantStack extends cdk.Stack {
 
 
 
-    const apiSvcSG = new ec2.SecurityGroup(this, '${tenantId}-${environment}-api-svc-sg', {
+    const apiSvcSG = new ec2.SecurityGroup(this, '${tenantId}-${environment}-apiSvcSg', {
       vpc,
       allowAllOutbound: false, // disable default output
       description: 'Security group for API service with restricted egress',
@@ -319,7 +336,7 @@ export class TenantStack extends cdk.Stack {
 
     // ECS Fargate
     const ecsFargateCluster = new ecs.Cluster(this, `${tenantId}-${environment}-cluster`, { vpc });
-    const apiSvcECSTaskDefinition = new ecs.FargateTaskDefinition(this, `${tenantId}-${environment}-api-svc-task`, {
+    const apiSvcECSTaskDefinition = new ecs.FargateTaskDefinition(this, `${tenantId}-${environment}-apiSvcTask`, {
       cpu: 256,
       memoryLimitMiB: 512,
     });
@@ -333,11 +350,11 @@ export class TenantStack extends cdk.Stack {
     });
 
     // Add a container to the task definition using an image from a registry
-    const apiSvcContainer = apiSvcECSTaskDefinition.addContainer('api-svc-container', {
+    const apiSvcContainer = apiSvcECSTaskDefinition.addContainer(`${tenantId}-${environment}-apiSvcContainer`, {
       // Use ecs.ContainerImage.fromRegistry() to specify the image
-      image: ecs.ContainerImage.fromEcrRepository(apiServiceECR, tenantStackConfig.services.api.image.tag),
+      image: ecs.ContainerImage.fromEcrRepository(apiSvcECR, tenantStackConfig.services.api.image.tag),
       logging: ecs.AwsLogDriver.awsLogs({
-        streamPrefix: "api-task-logs",
+        streamPrefix: "apiSvcTaskLogs",
         logGroup: apiSvcLogGroup,
       }),
       portMappings: [
@@ -366,8 +383,8 @@ export class TenantStack extends cdk.Stack {
       },
       // Use secrets for sensitive data
       secrets: {
-        COGNITO_CLIENT_ID: ecs.Secret.fromSecretsManager(appSvcClientSecret, 'COGNITO_CLIENT_ID'),
-        COGNITO_CLIENT_SECRET: ecs.Secret.fromSecretsManager(appSvcClientSecret, 'COGNITO_CLIENT_SECRET'),
+        COGNITO_CLIENT_ID: ecs.Secret.fromSecretsManager(apiSvcClientSecret, 'COGNITO_CLIENT_ID'),
+        COGNITO_CLIENT_SECRET: ecs.Secret.fromSecretsManager(apiSvcClientSecret, 'COGNITO_CLIENT_SECRET'),
       },
     });
 
@@ -402,8 +419,6 @@ export class TenantStack extends cdk.Stack {
       ],
     }));
 
-
-
     listener.addTargets('apiSvcTarget', {
       port: 8080,
       targets: [apiECSFargateService],
@@ -412,7 +427,6 @@ export class TenantStack extends cdk.Stack {
         interval: cdk.Duration.seconds(30),
       },
     });
-
 
     apiSvcSG.connections.allowFrom(alb, ec2.Port.tcp(8080), 'Allow ingress connection from ALB');
     apiSvcSG.connections.allowTo(ecrDockerEndpoint, ec2.Port.tcp(443), 'Allow egress to ECR Docker VPC endpoint');
@@ -493,6 +507,7 @@ export class TenantStack extends cdk.Stack {
 
     // Print output
     new CfnOutput(this, `${tenantId}-${environment}-userPoolId`, { value: userPool.userPoolId });
+    new CfnOutput(this, `${tenantId}-${environment}-apiSvcUrl`, { value: apiSvcUrl });
     // new CfnOutput(this, `${tenantId}-${environment}-frontendUrl`, { value: frontendOrigin });
     // new CfnOutput(this, `${tenantId}-${environment}-frontendSignInUrl`, { value: signInUrl });
     // new CfnOutput(this, `${tenantId}-${environment}-frontendBucket`, { value: frontendBucket.bucketName });

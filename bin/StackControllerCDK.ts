@@ -83,7 +83,7 @@ if (tenantId === 'share-service') {
     env: targetEnv
   });
 } else {
-  new TenantStack(app, `${tenantId}-tenant-stack`, tenantConfig, {
+  new TenantStack(app, `${tenantId}-${environment}-tenant-stack`, tenantConfig, {
     env: targetEnv
   });
 }

@@ -1,5 +1,7 @@
 tenantId: "test-tenant-1123"
 
+publicCertArn: "arn:aws:acm:us-west-2:835316199016:certificate/f7c5d3b0-fcde-43b2-8124-1be55d5ceae2"
+
 services:
   api:
     image:
