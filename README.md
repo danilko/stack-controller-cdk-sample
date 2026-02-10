@@ -7,8 +7,8 @@ Utilize layers of config
 config
   |_dev -> environment
     |_common.yaml -> common values
-    |_share-service.yaml -> share service stack config, inheirt any common if not override
-    |_test-tenant-1123.yaml -> example tenant stack config, inheirt any common if not override
+    |_share-service.yaml -> share service stack config, inherit any common if not override
+    |_test-tenant-1123.yaml -> example tenant stack config, inherit any common if not override
 ```
 
 ```bash
@@ -17,7 +17,7 @@ cdk deploy -c tenantId=share-service
 
 # login to ECR registry
 #  uri from above share service output, such as 111116177016.dkr.ecr.us-west-2.amazonaws.com/share-service-api-service
-aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin 111116177016.dkr.ecr.us-west-2.amazonaws.com/share-service-api-service
+aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin 111116177016.dkr.ecr.us-west-2.amazonaws.com/share-service-dev-api-service
 
 # build and push the docker images
 cd services/api/
@@ -28,8 +28,8 @@ docker run -p 8080:8080 api-al2023
 # should able to hit http://localhost:8080/api/v1/health and get result
 # exit the above docker run by doing ctrl + C
 
-docker tag api-al2023:latest 111116177016.dkr.ecr.us-west-2.amazonaws.com/share-service-api-service:1.0
-docker push 111116177016.dkr.ecr.us-west-2.amazonaws.com/share-service-api-service:1.0
+docker tag api-al2023:latest 111116177016.dkr.ecr.us-west-2.amazonaws.com/share-service-dev-api-service:1.0
+docker push 111116177016.dkr.ecr.us-west-2.amazonaws.com/share-service-dev-api-service:1.0
 # back to root
 cd ../../
 
