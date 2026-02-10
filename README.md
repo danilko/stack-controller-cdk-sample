@@ -1,12 +1,14 @@
 # A Sample to demo ability to manage share service and multi tenant stacks through one set of CDK
 
+# STILL NOT STABLE, DO NOT USE IN PRODUCTION AS IS
+
+## Overall Architecture
+
 Overall Setup Flow
 ![multi-tenants-stack-setup.drawio.png](diagrams/multi-tenants-stack-setup.drawio.png)
 
 Upload flow
 ![upload-flow.drawio.png](diagrams/upload-flow.drawio.png)
-
-# STILL NOT STABLE, DO NOT USE IN PRODUCTION AS IS
 
 Utilize layers of config
 ```text
@@ -19,7 +21,7 @@ config
 
 ## Requirements
 1. Install [AWS CDK](https://docs.aws.amazon.com/cdk/v2/guide/getting-started.html)
-2. INstall AWS CLIBelow utilize a self-signed cert
+2. Install AWS CLIBelow utilize a self-signed cert
 
 ## Setup Steps
 
