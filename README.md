@@ -1,13 +1,14 @@
-# A Sample to demo ability to mananage share service and multi tenant stacks through one set of CDK
+# A Sample to demo ability to manage share service and multi tenant stacks through one set of CDK
 
 # STILL NOT STABLE, DO NOT USE IN PRODUCTION AS IS
 
 Utilize layers of config
 ```text
 config
- |_common.yaml -> common values
- |_share-service.yaml -> share service stack config, inheirt any common if not override
- |_test-tenant-1123.yaml -> example tenant stack config, inheirt any common if not override
+  |_dev -> environment
+    |_common.yaml -> common values
+    |_share-service.yaml -> share service stack config, inheirt any common if not override
+    |_test-tenant-1123.yaml -> example tenant stack config, inheirt any common if not override
 ```
 
 ```bash

@@ -10,25 +10,28 @@ const app = new cdk.App();
 
 // Get tenant_id from context (e.g., cdk deploy -c tenantId=cust-001)
 const tenantId = app.node.tryGetContext('tenantId');
+const environment = app.node.tryGetContext('environment');
 
-if (!tenantId) {
-  console.error('No target cluster id provided. Use -c tenant_id=<id> to target a specific stack.');
+if (!tenantId || !environment) {
+  console.error('No tenantId and/or environment specified. Use `-c environment=<environment> -c tenantId=<tenantId>` to target a specific stack.');
   process.exit(1);
 }
 
 // Load Configuration
-const loadConfig = (tenantId: string): TenantStackConfig => {
+const loadConfig = (environment: string, tenantId: string): TenantStackConfig => {
   const lowerTenantId = tenantId.toLowerCase();
 
-  const commonConfigPath = path.join(__dirname, '../config', `common.yaml`);
 
-  const tenantConfigPath = path.join(__dirname, '../config', `${lowerTenantId}.yaml`);
+  const commonConfigPath = path.join(__dirname, `../config/${environment}`, `common.yaml`);
+
+  const tenantConfigPath = path.join(__dirname, `../config/${environment}`, `${lowerTenantId}.yaml`);
 
   let finalConfig = {} as any;
 
   try {
     // Load Common Config (The Baseline)
     if (fs.existsSync(commonConfigPath)) {
+      console.info(`Load common config file for environment '${environment}' and tenantId '${tenantId}' from: ${tenantConfigPath.toString()}`);
       const commonContent = fs.readFileSync(commonConfigPath, 'utf8');
       finalConfig = yaml.load(commonContent) || {};
 
@@ -38,6 +41,7 @@ const loadConfig = (tenantId: string): TenantStackConfig => {
 
     // Load tenant setting for override
     if (fs.existsSync(tenantConfigPath)) {
+      console.info(`Load tenant config file for environment '${environment}' and tenantId '${tenantId}' from: ${tenantConfigPath.toString()}`);
       const tenantContent = fs.readFileSync(tenantConfigPath, 'utf8');
       const tenantConfig = yaml.load(tenantContent) as Record<string, any>;
 
@@ -52,6 +56,12 @@ const loadConfig = (tenantId: string): TenantStackConfig => {
 
     console.info(`Final Config: ${JSON.stringify(response)}`)
 
+    if (!response.tenantId || !response.environment)
+    {
+      console.error('No tenantId and/or environment specified in config files, please check');
+      process.exit(1);
+    }
+
     return response;
 
   } catch (e) {
@@ -60,7 +70,7 @@ const loadConfig = (tenantId: string): TenantStackConfig => {
   }
 };
 
-const tenantConfig = loadConfig(tenantId);
+const tenantConfig = loadConfig(environment, tenantId);
 
 const targetEnv: cdk.Environment = {
   account: (tenantConfig.aws.accountId).toString(),

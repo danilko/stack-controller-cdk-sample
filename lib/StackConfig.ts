@@ -1,3 +1,4 @@
+export const SHARE_SERVICE_TENANT_ID = 'share-service'
 
 export class AwsConfig {
   region: string
@@ -20,6 +21,7 @@ export class Services {
 
 export class TenantStackConfig {
   tenantId: string
+  environment: string
   aws: AwsConfig
   services: Services
 }

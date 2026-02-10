@@ -1,0 +1,12 @@
+aws:
+  accountId: <aws account id>
+  region: us-west-2
+
+tenantId: ""
+environment: "dev"
+
+services:
+  api:
+    image:
+      tag: "2.0"
+    bedrockModelId: "anthropic.claude-3-sonnet-20240229-v1:0"

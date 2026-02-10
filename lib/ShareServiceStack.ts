@@ -1,16 +1,23 @@
 import * as cdk from 'aws-cdk-lib';
-import {CfnOutput, RemovalPolicy, StackProps} from 'aws-cdk-lib';
+import {CfnOutput, RemovalPolicy, StackProps, Tags} from 'aws-cdk-lib';
 import {Construct} from 'constructs';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as ecr from 'aws-cdk-lib/aws-ecr'
 import * as iam from 'aws-cdk-lib/aws-iam'
 import {TenantStackConfig} from "./StackConfig";
 
-const tenantId = 'share-service';
+
 
 export class ShareServiceStack extends cdk.Stack {
   constructor(scope: Construct, id: string, tenantStackConfig: TenantStackConfig, props: StackProps) {
     super(scope, id, props);
+
+    const tenantId = tenantStackConfig.tenantId;
+    const environment = tenantStackConfig.environment;
+
+    // Apply to everything in the stack
+    Tags.of(this).add('tenantId', tenantId);
+    Tags.of(this).add('environment', tenantStackConfig.environment);
 
     // Encryption - Custom KMS Key
     const shareServiceKmsKey = new kms.Key(this, `${tenantId}-key`, {
@@ -61,12 +68,12 @@ export class ShareServiceStack extends cdk.Stack {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
-    new CfnOutput(this, "share-service-kmsKeyArn", { value: shareServiceKmsKey.keyArn, exportName: "share-service-kmsKeyArn"});
-    new CfnOutput(this, "share-service-apiServiceECRArn", { value: apiServiceECR.repositoryArn , exportName: "share-service-apiServiceECRArn"});
+    new CfnOutput(this, `${tenantId}-${environment}-kmsKeyArn`, { value: shareServiceKmsKey.keyArn, exportName: `${tenantId}-${environment}-kmsKeyArn`});
+    new CfnOutput(this,  `${tenantId}-${environment}-apiServiceECRArn`, { value: apiServiceECR.repositoryArn , exportName: `${tenantId}-${environment}-apiServiceECRArn`});
     // Export the Name (Required to satisfy the late-binding error)
-    new cdk.CfnOutput(this, 'share-service-apiECRName', {value: apiServiceECR.repositoryName, exportName: 'share-service-apiServiceECRName',});
+    new cdk.CfnOutput(this, `${tenantId}-${environment}-apiServiceECRName`, {value: apiServiceECR.repositoryName, exportName: `${tenantId}-${environment}-apiServiceECRName`});
 
-    new CfnOutput(this, "share-service-apiServiceECRUri", { value: apiServiceECR.repositoryUri , exportName: "share-service-apiServiceECRUri"});
+    new CfnOutput(this, `${tenantId}-${environment}-apiServiceECRUri`, { value: apiServiceECR.repositoryUri , exportName: `${tenantId}-${environment}-apiServiceECRUri`});
 
   }
 }

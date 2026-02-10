@@ -1,4 +1,4 @@
-tenantId: test-tenant-1123
+tenantId: "test-tenant-1123"
 
 services:
   api:

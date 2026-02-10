@@ -22,7 +22,7 @@ import {
   StackProps,
   Tags
 } from "aws-cdk-lib";
-import {TenantStackConfig} from "./StackConfig";
+import {SHARE_SERVICE_TENANT_ID, TenantStackConfig} from "./StackConfig";
 import {OriginAccessIdentity} from "aws-cdk-lib/aws-cloudfront";
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager'
 
@@ -32,21 +32,23 @@ export class TenantStack extends cdk.Stack {
     super(scope, id, props);
 
     const tenantId = tenantStackConfig.tenantId;
+    const environment = tenantStackConfig.environment;
 
     // import the ecr arn from exporting stack `share-service-stack`
     const shareServiceKMSKey = kms.Key.fromKeyArn(
-      this, 'share-service-kmsKeyArn',
-      cdk.Fn.importValue('share-service-kmsKeyArn'),
+      this, `${SHARE_SERVICE_TENANT_ID}-${environment}-kmsKeyArn`,
+      cdk.Fn.importValue(`${SHARE_SERVICE_TENANT_ID}-${environment}-kmsKeyArn`),
     )
     // need to use fromRepositoryAttributes with repositoryArn and repositoryName to satisfy late binding issue
     const apiServiceECR = ecr.Repository.fromRepositoryAttributes(
-      this, 'share-service-apiServiceECR',
-      {repositoryArn:cdk.Fn.importValue('share-service-apiServiceECRArn'),
-        repositoryName: cdk.Fn.importValue('share-service-apiServiceECRName')
+      this, `${SHARE_SERVICE_TENANT_ID}-${environment}-apiServiceECR`,
+      {repositoryArn:cdk.Fn.importValue(`${SHARE_SERVICE_TENANT_ID}-${environment}-apiServiceECRArn`),
+        repositoryName: cdk.Fn.importValue(`${SHARE_SERVICE_TENANT_ID}-${environment}-apiServiceECRName`)
       });
 
     // Apply to everything in the stack
     Tags.of(this).add('tenantId', tenantId);
+    Tags.of(this).add('environment', environment);
 
 
     // Encryption - Custom KMS Key
@@ -207,11 +209,11 @@ export class TenantStack extends cdk.Stack {
     // currently use out of box domain from cognito
     const userPoolDomain = userPool.addDomain(`${tenantId}-domain`, {
       cognitoDomain: {
-        domainPrefix: `${tenantId}-${this.region}-app`,
+        domainPrefix: `${tenantId}-${environment}-${this.region}-app`,
       }
     });
 
-    const appSvcClient = userPool.addClient(`${tenantId}-appSvcClient`, {
+    const appSvcClient = userPool.addClient(`${tenantId}-${environment}-appSvcClient`, {
       oAuth: {
         flows: {
           authorizationCodeGrant: true, // Required for backend svc flow
@@ -222,7 +224,7 @@ export class TenantStack extends cdk.Stack {
       generateSecret: true,
     });
 
-    const appSvcClientSecret = new secretsmanager.Secret(this, `${tenantId}-appSvcClientSecret`, {
+    const appSvcClientSecret = new secretsmanager.Secret(this, `${tenantId}-${environment}-appSvcClientSecret`, {
       secretObjectValue: {
         // Map the Cognito values to keys inside the JSON secret
         COGNITO_CLIENT_ID: SecretValue.unsafePlainText(appSvcClient.userPoolClientId),
@@ -232,12 +234,12 @@ export class TenantStack extends cdk.Stack {
     });
 
     // // Security - WAF (Simplified HIPAA-like set)
-    // const waf = new wafv2.CfnWebACL(this, `${tenantId}-waf`, {
+    // const waf = new wafv2.CfnWebACL(this, `${tenantId}-${environment}-waf`, {
     //   defaultAction: { allow: {} },
     //   scope: 'REGIONAL',
     //   visibilityConfig: {
     //     cloudWatchMetricsEnabled: true,
-    //     metricName: `${tenantId}-waf-metric`,
+    //     metricName: `${tenantId}-${environment}-waf-metric`,
     //     sampledRequestsEnabled: true,
     //   },
     //   rules: [
@@ -260,14 +262,14 @@ export class TenantStack extends cdk.Stack {
     //   ],
     // });
     // // Associate WAF
-    // new wafv2.CfnWebACLAssociation(this, `${tenantId}-waf-assoc`, {
+    // new wafv2.CfnWebACLAssociation(this, `${tenantId}-${environment}-waf-assoc`, {
     //   resourceArn: alb.loadBalancerArn,
     //   webAclArn: waf.attrArn,
     // });
     //
     // // Storage - Customer Data S3
-    // const dataBucket = new s3.Bucket(this, `${tenantId}-${this.region}-data-bucket`, {
-    //   bucketName: `${tenantId}-data`,
+    // const dataBucket = new s3.Bucket(this, `${tenantId}-${environment}-${this.region}-data-bucket`, {
+    //   bucketName: `${tenantId}-${environment}-data`,
     //   encryptionKey: tenantKmsKey,
     //   objectOwnership: s3.ObjectOwnership.OBJECT_WRITER,
     //   publicReadAccess: false,
@@ -276,8 +278,8 @@ export class TenantStack extends cdk.Stack {
     //   removalPolicy: cdk.RemovalPolicy.RETAIN, // HIPAA Compliance practice
     // });
     //
-    // const rawDataBucket = new s3.Bucket(this, `${tenantId}-${this.region}-raw-data-bucket`, {
-    //   bucketName: `${tenantId}-raw-data`,
+    // const rawDataBucket = new s3.Bucket(this, `${tenantId}-${environment}-${this.region}-raw-data-bucket`, {
+    //   bucketName: `${tenantId}-${environment}-raw-data`,
     //   encryptionKey: tenantKmsKey,
     //   objectOwnership: s3.ObjectOwnership.OBJECT_WRITER,
     //   publicReadAccess: false,
@@ -309,22 +311,22 @@ export class TenantStack extends cdk.Stack {
 
 
 
-    const apiSvcSG = new ec2.SecurityGroup(this, '${tenantId}-api-svc-sg', {
+    const apiSvcSG = new ec2.SecurityGroup(this, '${tenantId}-${environment}-api-svc-sg', {
       vpc,
       allowAllOutbound: false, // disable default output
       description: 'Security group for API service with restricted egress',
     });
 
     // ECS Fargate
-    const ecsFargateCluster = new ecs.Cluster(this, `${tenantId}-cluster`, { vpc });
-    const apiSvcECSTaskDefinition = new ecs.FargateTaskDefinition(this, `${tenantId}-api-svc-task`, {
+    const ecsFargateCluster = new ecs.Cluster(this, `${tenantId}-${environment}-cluster`, { vpc });
+    const apiSvcECSTaskDefinition = new ecs.FargateTaskDefinition(this, `${tenantId}-${environment}-api-svc-task`, {
       cpu: 256,
       memoryLimitMiB: 512,
     });
 
 
     const apiSvcLogGroup = new logs.LogGroup(this, 'apiLogGroup', {
-      logGroupName: `/ecs/${tenantId}-api-service`,
+      logGroupName: `/ecs/${tenantId}-${environment}-api-service`,
       encryptionKey: tenantKmsKey, // Enables the CMK encryption
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: RemovalPolicy.DESTROY,
@@ -369,7 +371,7 @@ export class TenantStack extends cdk.Stack {
       },
     });
 
-    const apiECSFargateService = new ecs.FargateService(this, `${tenantId}-api-fargate-svc`, {
+    const apiECSFargateService = new ecs.FargateService(this, `${tenantId}-${environment}-api-fargate-svc`, {
       cluster: ecsFargateCluster,
       taskDefinition: apiSvcECSTaskDefinition,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
@@ -426,8 +428,8 @@ export class TenantStack extends cdk.Stack {
 
     //
     // // Frontend - S3 + CloudFront
-    // const frontendBucket = new s3.Bucket(this, `${tenantId}-frontend-bucket`, {
-    //   bucketName: `${tenantId}-frontend`,
+    // const frontendBucket = new s3.Bucket(this, `${tenantId}-${environment}-frontend-bucket`, {
+    //   bucketName: `${tenantId}-${environment}-frontend`,
     //   encryptionKey: tenantKmsKey,
     //   objectOwnership: s3.ObjectOwnership.OBJECT_WRITER,
     //   publicReadAccess: false,
@@ -439,7 +441,7 @@ export class TenantStack extends cdk.Stack {
     // // Crate origin access identity (need for kms encrpyted bucket)
     // // https://stackoverflow.com/questions/60905976/cloudfront-give-access-denied-response-created-through-aws-cdk-python-for-s3-buc
     // const originAccessIdentity = new OriginAccessIdentity(this, "originAccessIdentity", {
-    //   comment: `created-for-${tenantId}-frontend`
+    //   comment: `created-for-${tenantId}-${environment}-frontend`
     // });
     // frontendBucket.grantRead(originAccessIdentity);
     //
@@ -490,9 +492,9 @@ export class TenantStack extends cdk.Stack {
     // });
 
     // Print output
-    // new CfnOutput(this, `${tenantId}-userPoolId`, { value: userPool.userPoolId });
-    // new CfnOutput(this, `${tenantId}-frontendUrl`, { value: frontendOrigin });
-    // new CfnOutput(this, `${tenantId}-frontendSignInUrl`, { value: signInUrl });
-    // new CfnOutput(this, `${tenantId}-frontendBucket`, { value: frontendBucket.bucketName });
+    new CfnOutput(this, `${tenantId}-${environment}-userPoolId`, { value: userPool.userPoolId });
+    // new CfnOutput(this, `${tenantId}-${environment}-frontendUrl`, { value: frontendOrigin });
+    // new CfnOutput(this, `${tenantId}-${environment}-frontendSignInUrl`, { value: signInUrl });
+    // new CfnOutput(this, `${tenantId}-${environment}-frontendBucket`, { value: frontendBucket.bucketName });
   }
 }
