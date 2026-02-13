@@ -17,7 +17,6 @@ import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 
 import {
-  aws_bedrock,
   aws_cloudfront_origins,
   CfnOutput,
   Duration,
@@ -63,7 +62,7 @@ export class TenantStack extends cdk.Stack {
 
     // Encryption - Custom KMS Key
     const tenantKmsKey = new kms.Key(this, `${tenantId}-${this.region}-key`, {
-      alias: `alias/${tenantId}-key`,
+      alias: `alias/tenant-${tenantId}-key`,
       enableKeyRotation: true,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
@@ -198,14 +197,6 @@ export class TenantStack extends cdk.Stack {
     const sqsEndpoint = vpc.addInterfaceEndpoint(`${tenantId}-${environment}-${this.region}-sqs`, {
       service: ec2.InterfaceVpcEndpointAwsService.SQS,
     });
-
-
-    // Reference the imported certificate by ARN
-    const certificate = certificatemanager.Certificate.fromCertificateArn(
-      this,
-      `${tenantId}-${environment}-selfSignedCert`,
-      tenantStackConfig.publicCertArn
-    );
 
     const albSG = new ec2.SecurityGroup(this, `${tenantId}-${environment}-${this.region}-alb-sg`, {
       vpc,
@@ -500,70 +491,60 @@ export class TenantStack extends cdk.Stack {
     // Grant the ECS task permission to read the DB password from Secrets Manager
     dbCluster.secret?.grantRead(apiECSFargateService.taskDefinition.taskRole);
 
-    //
-    // // Frontend - S3 + CloudFront
-    // const frontendBucket = new s3.Bucket(this, `${tenantId}-${environment}-${this.region}-frontend-bucket`, {
-    //   bucketName: `${tenantId}-${environment}-${this.region}-frontend`,
-    //   encryptionKey: tenantKmsKey,
-    //   objectOwnership: s3.ObjectOwnership.OBJECT_WRITER,
-    //   publicReadAccess: false,
-    //   enforceSSL: true,
-    //   blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-    //   removalPolicy: cdk.RemovalPolicy.RETAIN, // HIPAA Compliance practice
-    // });
-    //
-    // // Crate origin access identity (need for kms encrpyted bucket)
-    // // https://stackoverflow.com/questions/60905976/cloudfront-give-access-denied-response-created-through-aws-cdk-python-for-s3-buc
-    // const originAccessIdentity = new OriginAccessIdentity(this, "originAccessIdentity", {
-    //   comment: `created-for-${tenantId}-${environment}-${this.region}-frontend`
-    // });
-    // frontendBucket.grantRead(originAccessIdentity);
-    //
-    // // --------------------------------------------------------------------------------------
-    // // Cloudfront frontend for site distription and serving https as S3 Hosting does not serving HTTPS
-    // // --------------------------------------------------------------------------------------
-    // // https://github.com/aws-samples/aws-cdk-examples/issues/1084
-    // const frontendDistribution = new cloudfront.Distribution(this, 'frontendDistribution', {
-    //   defaultBehavior: {
-    //     origin: aws_cloudfront_origins.S3BucketOrigin.withOriginAccessControl(frontendBucket),
-    //     viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-    //   },
-    //   defaultRootObject: "index.html"
-    // });
-    //
-    // const frontendOrigin = 'https://' + frontendDistribution.distributionDomainName;
-    // // Enable below only for local test
-    //
-    // // Add CORS to allow the cloudfront frontend to access the raw data bucket
-    // // Currently enable GET/POST/PUT/DELETE to retrieve and update content
-    // rawDataBucket.addCorsRule({
-    //   allowedMethods: [s3.HttpMethods.GET, s3.HttpMethods.PUT, s3.HttpMethods.POST, s3.HttpMethods.DELETE],
-    //   allowedOrigins: [frontendOrigin],
-    // });
-    //
+
+    // Frontend - S3 + CloudFront
+    const frontendBucket = new s3.Bucket(this, `${tenantId}-${environment}-${this.region}-frontend-bucket`, {
+      bucketName: `${tenantId}-${environment}-${this.region}-frontend`,
+      encryptionKey: tenantKmsKey,
+      objectOwnership: s3.ObjectOwnership.OBJECT_WRITER,
+      publicReadAccess: false,
+      enforceSSL: true,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      removalPolicy: cdk.RemovalPolicy.RETAIN, // HIPAA Compliance practice
+    });
+
+    // Crate origin access identity (need for kms encrpyted bucket)
+    // https://stackoverflow.com/questions/60905976/cloudfront-give-access-denied-response-created-through-aws-cdk-python-for-s3-buc
+    const originAccessIdentity = new OriginAccessIdentity(this, "originAccessIdentity", {
+      comment: `created-for-${tenantId}-${environment}-${this.region}-frontend`
+    });
+    frontendBucket.grantRead(originAccessIdentity);
+
+    // --------------------------------------------------------------------------------------
+    // Cloudfront frontend for site distription and serving https as S3 Hosting does not serving HTTPS
+    // --------------------------------------------------------------------------------------
+    // https://github.com/aws-samples/aws-cdk-examples/issues/1084
+    const frontendDistribution = new cloudfront.Distribution(this, 'frontendDistribution', {
+      defaultBehavior: {
+        origin: aws_cloudfront_origins.S3BucketOrigin.withOriginAccessControl(frontendBucket),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      },
+      defaultRootObject: "index.html"
+    });
+
+    const frontendOrigin = 'https://' + frontendDistribution.distributionDomainName;
+    // Enable below only for local test
+
+    // Setup a client for website client
+    const frontendAppClient = userPool.addClient('frontend-client', {
+      accessTokenValidity: Duration.minutes(60), // Token lifetime
+      generateSecret: false,
+      preventUserExistenceErrors: true,    // Prevent user existence error to further secure (so will not notify that username exist or not)
+      oAuth: {
+        flows: {
+          implicitCodeGrant: true, // Use implicit grant in this case, as the website does not have a backend
+        },
+        scopes: [cognito.OAuthScope.OPENID],
+        callbackUrls: [frontendOrigin],  // For callback and logout, go back to the website
+        logoutUrls: [frontendOrigin],
+      }
+    });
 
 
-    //
-    // // Setup a client for website client
-    // const frontendAppClient = userPool.addClient('frontend-client', {
-    //   accessTokenValidity: Duration.minutes(60), // Token lifetime
-    //   generateSecret: false,
-    //   preventUserExistenceErrors: true,    // Prevent user existence error to further secure (so will not notify that username exist or not)
-    //   oAuth: {
-    //     flows: {
-    //       implicitCodeGrant: true, // Use implicit grant in this case, as the website does not have a backend
-    //     },
-    //     scopes: [cognito.OAuthScope.OPENID],
-    //     callbackUrls: [frontendOrigin],  // For callback and logout, go back to the website
-    //     logoutUrls: [frontendOrigin],
-    //   }
-    // });
-    //
-    //
-    // // Setup login Url
-    // const signInUrl = userPoolDomain.signInUrl(frontendAppClient, {
-    //   redirectUri: frontendOrigin, // must be a URL configured under 'callbackUrls' with the client
-    // });
+    // Setup login Url
+    const signInUrl = userPoolDomain.signInUrl(frontendAppClient, {
+      redirectUri: frontendOrigin, // must be a URL configured under 'callbackUrls' with the client
+    });
 
     // Print output
     new CfnOutput(this, `${tenantId}-${environment}-${this.region}-userPoolId`, { value: userPool.userPoolId });

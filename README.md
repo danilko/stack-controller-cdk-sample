@@ -7,8 +7,15 @@
 Overall Setup Flow
 ![multi-tenants-stack-setup.drawio.png](diagrams/multi-tenants-stack-setup.drawio.png)
 
-Upload flow
+- Ability to use one cdk repo to deploy/manage one share service stack and multi-tenant specific services stack with either same consistency or tenant override
+
+Malware scan upload flow
 ![upload-flow.drawio.png](diagrams/upload-flow.drawio.png)
+
+- Above utilize an ingest bucket to overcome the current hard limit of 25 buckets for guard duty.
+- STS token will be generated on user upload with tenant specific kms key, and other key will not be allowed to further strength ingest
+- EventBridge to SQS based on S3 key to target tenant SQS
+- Backend pull SQS to move valid data to tenant data s3 bucket and remove ones that are not valid
 
 Utilize layers of config
 ```text
@@ -21,29 +28,10 @@ config
 
 ## Requirements
 1. Install [AWS CDK](https://docs.aws.amazon.com/cdk/v2/guide/getting-started.html)
-2. Install AWS CLIBelow utilize a self-signed cert
 
 ## Setup Steps
 
-1. Create self-signed cert, or import a proper cert
-```bash
-# Generate a private key
-openssl genrsa -out private.key 2048
-
-# Create the self-signed certificate (valid for 365 days)
-# Note: You can leave the prompts blank, but set 'Common Name' to your ALB DNS if known, or just 'test.com'
-openssl req -new -x509 -key private.key -out certificate.crt -days 365
-
-# install cert into aws account
-aws acm import-certificate --certificate fileb://certificate.crt --private-key fileb://private.key
-
-```
-2. Copy the output above into `config/dev/test-tenant-1123.yaml` into `publicCertArn` field like below
-```yaml
-publicCertArn: "arn:aws:acm:us-west-2:122212112:certificate/fda5d3b0-fcde-43b2-2224-1be55d5ceae2"
-```
-
-3. Setup share service and deploy docker images into ecr
+1. Setup share service and deploy docker images into ecr
 ```bash
 # first deploy share service (please ensure to update all config in common folder)
 cdk deploy -c tenantId=share-service
@@ -67,7 +55,7 @@ docker push 111116177016.dkr.ecr.us-west-2.amazonaws.com/share-service-dev-api-s
 cd ../../
 ```
 
-4. Deploy one of tenant 
+2. Deploy one of tenant 
 ```bash
 cdk deploy -c tenantId=test-tenant-1123.yaml
 ```

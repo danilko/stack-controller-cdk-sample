@@ -22,7 +22,7 @@ export class ShareServiceStack extends cdk.Stack {
     Tags.of(this).add('region', this.region);
     // Encryption - Custom KMS Key
     const shareServiceKmsKey = new kms.Key(this, `${tenantId}-${environment}-${this.region}-key`, {
-      alias: `alias/${tenantId}-${environment}-key`,
+      alias: `alias/tenant-${tenantId}-${environment}-key`,
       enableKeyRotation: true,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
@@ -100,12 +100,24 @@ export class ShareServiceStack extends cdk.Stack {
       resources: [shareServiceIngestBucket.bucketArn],
     }));
 
-    // For access to different services encrypt with kms
+    // For access to different tenant objects in ingest which encrypt with different tenant kms
     guarddutyIAMRole.addToPrincipalPolicy(new iam.PolicyStatement({
       actions: ['kms:Decrypt', 'kms:DescribeKey', 'kms:CreateGrant', 'kms:RetireGrant', 'kms:GenerateDataKey'], // Decrypt is needed for reading, GenerateDataKey for uploading
-      resources: [shareServiceKmsKey.keyArn],
-    }));
+      resources: [`arn:aws:kms:${this.region}:${this.account}:key/*`],
+      conditions: {
+        'ForAnyValue:StringLike': {
+          'kms:ResourceAliases': 'alias/tenant*'
+        }
+    }}));
 
+
+    // Add CORS to allow the cloudfront frontend to access the ingest data bucket
+    // Currently enable GET/POST/PUT/DELETE to retrieve and update content
+    shareServiceIngestBucket.addCorsRule({
+      allowedMethods: [s3.HttpMethods.GET, s3.HttpMethods.PUT, s3.HttpMethods.POST],
+      // TODO should be setup to allow only fixed domains
+      allowedOrigins: ['*'],
+    });
 
     // 4. Enable GuardDuty Malware Protection for the bucket
     // This triggers a scan every time a new object is created
