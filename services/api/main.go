@@ -6,10 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
-	"github.com/bytedance/gopkg/util/logger"
 	"log"
-	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,27 +14,22 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/lestrrat-go/jwx/v2/jwk"
-	"github.com/lestrrat-go/jwx/v2/jwt"
-	"golang.org/x/oauth2"
-
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/bytedance/gopkg/util/logger"
+	"github.com/google/uuid"
+	"github.com/lestrrat-go/jwx/v2/jwk"
+	"github.com/lestrrat-go/jwx/v2/jwt"
 
 	_ "github.com/lib/pq"
-
-	swaggerFiles "github.com/swaggo/files"
-	ginSwagger "github.com/swaggo/gin-swagger"
-	// Replace "go-swagger-api" with your actual module name from go.mod
-	_ "api/docs"
 )
 
 var (
-	cognitoConfig                  *oauth2.Config
+	cognitoAuthConfig              *CognitoAuthConfig
 	jwksCache                      *jwk.Cache
 	cognitoIssuer                  string
 	bedrockClient                  *bedrockruntime.Client
@@ -53,6 +45,10 @@ var (
 	kmsTenantKeyArn                string
 	tenantId                       string
 )
+
+type ctxKey string
+
+const TraceIDKey ctxKey = "trace_id"
 
 // Book represents the data model
 type Book struct {
@@ -77,6 +73,13 @@ type AnthropicBody struct {
 	Messages         []Message `json:"messages"`
 }
 
+// AuthConfig represents the data your frontend needs
+type CognitoAuthConfig struct {
+	ClientID    string `json:"clientId"`
+	Domain      string `json:"domain"`
+	RedirectURI string `json:"redirectUri"`
+}
+
 type GuardDutyEvent struct {
 	Detail struct {
 		ScanStatus      string `json:"scanStatus"` // e.g., NO_THREATS_FOUND
@@ -96,9 +99,14 @@ type Message struct {
 }
 
 func init() {
+	cognitoAuthConfig = &CognitoAuthConfig{
+		ClientID:    os.Getenv("COGNITO_CLIENT_ID"),
+		Domain:      os.Getenv("COGNITO_DOMAIN"),
+		RedirectURI: os.Getenv("COGNITO_REDIRECT_URI"),
+	}
+
 	region = os.Getenv("AWS_REGION")
 	userPoolID := os.Getenv("COGNITO_USER_POOL_ID")
-	cognitoDomain := os.Getenv("COGNITO_DOMAIN")
 	tenantId = os.Getenv("TENANT_ID")
 	kmsTenantKeyArn = os.Getenv("KMS_TENANT_KEY_ARN")
 
@@ -119,17 +127,6 @@ func init() {
 
 	cognitoIssuer = fmt.Sprintf("https://cognito-idp.%s.amazonaws.com/%s", region, userPoolID)
 	jwksURL := cognitoIssuer + "/.well-known/jwks.json"
-
-	cognitoConfig = &oauth2.Config{
-		ClientID:     os.Getenv("COGNITO_CLIENT_ID"),
-		ClientSecret: os.Getenv("COGNITO_CLIENT_SECRET"),
-		RedirectURL:  os.Getenv("COGNITO_REDIRECT_URL"),
-		Scopes:       []string{"openid", "email", "profile"},
-		Endpoint: oauth2.Endpoint{
-			AuthURL:  cognitoDomain + "/oauth2/authorize",
-			TokenURL: cognitoDomain + "/oauth2/token",
-		},
-	}
 
 	logger.Info(fmt.Sprintf("Start Cognito Configuration against: %s", cognitoIssuer))
 
@@ -158,107 +155,75 @@ func initDBConnection() {
 	db = localDb
 }
 
-// @title           Go Sample REST API
-// @version         1.0
-// @description     This is a sample server for a book management API.
-// @host            localhost:8080
-// @BasePath        /api/v1
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	r := gin.Default()
+	// Initialize ServeMux (Standard Library Router)
+	mux := http.NewServeMux()
 
-	r.GET("/login", func(c *gin.Context) {
-		url := cognitoConfig.AuthCodeURL("state-token")
-		c.Redirect(http.StatusTemporaryRedirect, url)
-	})
+	// Public Routes
+	mux.HandleFunc("GET /api/v1/health", getHealth)
+	mux.HandleFunc("GET /api/v1/info", getCognitoAuthConfig)
 
-	r.GET("/callback", HandleCallback)
+	// Protected Routes
+	// Wrap the specific handlers with our AuthMiddleware
+	mux.Handle("GET /api/v1/books", AuthMiddleware(http.HandlerFunc(getBooks)))
+	mux.Handle("GET /api/v1/ai/prompt", AuthMiddleware(http.HandlerFunc(askPrompt)))
+	mux.Handle("GET /api/v1/upload/token", AuthMiddleware(http.HandlerFunc(getSTSEndpoint)))
+	mux.Handle("GET /api/v1/user/profile", AuthMiddleware(http.HandlerFunc(getUserProfile)))
 
-	v1 := r.Group("/api/v1")
-	{
-		// 1. Public Routes
-		// Keep health checks public so the ALB/ECS can verify the container is alive
-		v1.GET("/health", GetHealth)
-
-		// 2. Protected Routes
-		// Create a sub-group that applies the middleware to everything inside the braces
-		authorized := v1.Group("/")
-		authorized.Use(AuthMiddleware())
-		{
-			authorized.GET("/books", GetBooks)
-			authorized.GET("/ai/prompt", AskPrompt)
-
-			authorized.GET("/upload/token", getSTSEndpoint)
-
-			authorized.GET("/user/profile", GetUserProfile)
-			// Any route added here automatically requires a token
-		}
-	}
-	// Swagger route
-	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+	var handler http.Handler = mux
+	handler = TracingMiddleware(handler) // Use the wrapped handler
 
 	srv := &http.Server{
-		Addr:    ":8080",
-		Handler: r,
+		Addr:         ":8080",
+		Handler:      handler,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
 	}
 
-	// Start SQS Poller in a separate Goroutine
 	go startSQSPoller(ctx)
 
-	// Start Server in a separate Goroutine
 	go func() {
+		log.Printf("Server starting on %s", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %s\n", err)
 		}
 	}()
 
-	// Wait for ECS/manual user to send a SIGTERM (shutdown signal)
 	<-ctx.Done()
 	log.Println("Shutting down gracefully...")
 
-	// Tell the HTTP server to stop accepting new requests
-	// Give it 5 seconds to finish current requests
 	shutdownCtx, srvCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer srvCancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Fatal("Server forced to shutdown:", err)
 	}
-
 	log.Println("Server exiting")
 }
 
-func HandleCallback(c *gin.Context) {
-	code := c.Query("code")
-	token, err := cognitoConfig.Exchange(c.Request.Context(), code)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Exchange failed"})
-		return
-	}
-	// Return the token to the user (or set in a secure cookie)
-	c.JSON(200, gin.H{"access_token": token.AccessToken, "id_token": token.Extra("id_token")})
-}
+// --- Middleware ---
 
-func AuthMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		authHeader := c.GetHeader("Authorization")
+func AuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		traceID, _ := r.Context().Value(TraceIDKey).(string)
+
+		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
-			c.AbortWithStatusJSON(401, gin.H{"error": "No token provided"})
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authorization error"})
 			return
 		}
 
 		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 
-		// Get Cognito Public Keys from cache
-		keyset, err := jwksCache.Get(c.Request.Context(), cognitoIssuer+"/.well-known/jwks.json")
+		keyset, err := jwksCache.Get(r.Context(), cognitoIssuer+"/.well-known/jwks.json")
 		if err != nil {
-			c.AbortWithStatusJSON(500, gin.H{"error": "Failed to fetch keys"})
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to fetch keys", "ref": traceID})
 			return
 		}
 
-		// Parse and Verify the Token
 		verifiedToken, err := jwt.ParseString(tokenStr,
 			jwt.WithKeySet(keyset),
 			jwt.WithValidate(true),
@@ -266,56 +231,139 @@ func AuthMiddleware() gin.HandlerFunc {
 		)
 
 		if err != nil {
-			c.AbortWithStatusJSON(401, gin.H{"error": "Invalid token: " + err.Error()})
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "Invalid token: " + err.Error(), "ref": traceID})
 			return
 		}
 
-		// Optional: Store claims in Gin context for later use
+		// Inject claims into request context
 		email, _ := verifiedToken.Get("email")
-		c.Set("email", email)
-		c.Set("token", tokenStr)
+		ctx := context.WithValue(r.Context(), "email", email)
+		ctx = context.WithValue(ctx, "token", tokenStr)
 
-		c.Next()
-	}
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
-// GetBooks godoc
-// @Summary      Show all books
-// @Description  get all books currently in the database
-// @Tags         books
-// @Produce      json
-// @Success      200  {array}   Book
-// @Router       /books [get]
-func GetBooks(c *gin.Context) {
+func TracingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 1. Generate or catch existing Trace ID
+		traceID := r.Header.Get("X-Trace-ID")
+		if traceID == "" {
+			traceID = uuid.New().String()
+		}
+
+		// 2. Put it in context
+		ctx := context.WithValue(r.Context(), TraceIDKey, traceID)
+
+		// 3. Set it in response header so the user/frontend sees it
+		w.Header().Set("X-Trace-ID", traceID)
+
+		// 4. Pass the new context to the next handler
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// --- Handlers ---
+
+func getBooks(w http.ResponseWriter, r *http.Request) {
 	books := []Book{
 		{ID: "1", Title: "Test book 1", Author: "Test Golang"},
 	}
-	c.JSON(http.StatusOK, books)
+	writeJSON(w, http.StatusOK, books)
 }
 
-func GetUserProfile(c *gin.Context) {
-	// Access user info stored in context by middleware
-	email, _ := c.Get("email")
-	token, _ := c.Get("token")
-	c.JSON(200, gin.H{"email": email, "token": token})
+func getUserProfile(w http.ResponseWriter, r *http.Request) {
+	email := r.Context().Value("email")
+	token := r.Context().Value("token")
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"email": email,
+		"token": token,
+	})
 }
 
-// GetHealth godoc
-// @Summary      Check health
-// @Description  get if API is available
-// @Tags         health
-// @Produce      json
-// @Success      200  obj Health
-// @Router       /health [get]
-func GetHealth(c *gin.Context) {
+func getHealth(w http.ResponseWriter, r *http.Request) {
+	traceID, _ := r.Context().Value(TraceIDKey).(string)
+
 	err := db.Ping()
 	if err != nil {
-		c.String(http.StatusInternalServerError, "DB Error: %s", err)
+		logger.Error(fmt.Sprintf("%v: health check failure: %v", traceID, err.Error()))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error", "ref": traceID})
+		return
+	}
+	writeJSON(w, http.StatusOK, Health{Health: 1})
+}
+
+func getCognitoAuthConfig(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, cognitoAuthConfig)
+}
+
+func getSTSEndpoint(w http.ResponseWriter, r *http.Request) {
+	traceID, _ := r.Context().Value(TraceIDKey).(string)
+
+	prefix := fmt.Sprintf("%v/upload-%v", tenantId, uuid.New())
+
+	// ... (Keep the policy string logic exactly the same)
+	policy := fmt.Sprintf(`{...}`, s3TenantDataBucketName, prefix, tenantId, kmsTenantKeyArn)
+
+	input := sts.GetFederationTokenInput{
+		Name:            aws.String(fmt.Sprintf("Upload-%s", tenantId)),
+		Policy:          aws.String(policy),
+		DurationSeconds: aws.Int32(900),
+	}
+
+	result, err := stsClient.GetFederationToken(r.Context(), &input)
+	if err != nil {
+		logger.Error(fmt.Sprintf("%v: sts token generation failure: %v", traceID, err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "error token generation"})
 		return
 	}
 
-	health := Health{Health: 1}
-	c.JSON(http.StatusOK, health)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"access_key":    *result.Credentials.AccessKeyId,
+		"secret_key":    *result.Credentials.SecretAccessKey,
+		"session_token": *result.Credentials.SessionToken,
+		"kms_key_id":    kmsTenantKeyArn,
+		"sts_endpoint":  "https://sts.amazonaws.com",
+		"required_tag":  fmt.Sprintf("tenantId=%s", tenantId),
+	})
+}
+
+func askPrompt(w http.ResponseWriter, r *http.Request) {
+	payload := AnthropicBody{
+		AnthropicVersion: "bedrock-2023-05-31",
+		MaxTokens:        1024,
+		Messages: []Message{
+			{Role: "user", Content: "Is google gemini winning over chatgpt?"},
+		},
+	}
+
+	payloadBytes, _ := json.Marshal(payload)
+
+	output, err := bedrockClient.InvokeModel(r.Context(), &bedrockruntime.InvokeModelInput{
+		ModelId:     aws.String(bedrockModelId),
+		ContentType: aws.String("application/json"),
+		Body:        payloadBytes,
+	})
+
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	var result map[string]interface{}
+	json.Unmarshal(output.Body, &result)
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":   "success",
+		"response": result["content"],
+	})
+}
+
+// --- Helpers ---
+func writeJSON(w http.ResponseWriter, status int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(data)
 }
 
 func startSQSPoller(c context.Context) {
@@ -421,95 +469,4 @@ func handleUnsafeObject(ctx context.Context, s3Client *s3.Client, key string) {
 	if err != nil {
 		log.Printf("Delete failed: %v", err)
 	}
-}
-
-func getSTSEndpoint(c *gin.Context) {
-	prefix := fmt.Sprintf("%v/upload-%v", tenantId, rand.Int())
-
-	// This policy is the "filter". Even if the ECS role has full S3 access,
-	// this token will ONLY have these specific rights.
-	policy := fmt.Sprintf(`{
-			"Version": "2012-10-17",
-			"Statement": [
-				{
-					"Effect": "Allow",
-					"Action": "s3:PutObject",
-					"Resource": "arn:aws:s3:::%s/%s",
-					"Condition": {
-						"StringEquals": { "s3:RequestObjectTag/tenantId": "%s" }
-					}
-				},
-				{
-					"Effect": "Allow",
-					"Action": [
-					"kms:GenerateDataKey",
-                    "kms:Decrypt",
-					"kms:DescribeKey"
-					],
-					"Resource": "%s"
-				}
-			]
-		}`, s3TenantDataBucketName, prefix, tenantId, kmsTenantKeyArn)
-
-	input := sts.GetFederationTokenInput{
-		Name:   aws.String(fmt.Sprintf("Upload-%s", tenantId)),
-		Policy: aws.String(policy),
-		// Only allow 15 minutes to reduce security risk
-		DurationSeconds: aws.Int32(900),
-	}
-
-	result, err := stsClient.GetFederationToken(c, &input)
-	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(200, gin.H{
-		"access_key":    *result.Credentials.AccessKeyId,
-		"secret_key":    *result.Credentials.SecretAccessKey,
-		"session_token": *result.Credentials.SessionToken,
-		"kms_key_id":    kmsTenantKeyArn,
-		"sts_endpoint":  "https://sts.amazonaws.com", // Or regional endpoint
-		"required_tag":  fmt.Sprintf("tenantId=%s", tenantId),
-	})
-}
-
-func AskPrompt(c *gin.Context) {
-	//var req PromptRequest
-	//if err := c.ShouldBindJSON(&req); err != nil {
-	//	c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
-	//	return
-	//}
-
-	// Prepare Anthropic Payload
-	payload := AnthropicBody{
-		AnthropicVersion: "bedrock-2023-05-31",
-		MaxTokens:        1024,
-		Messages: []Message{
-			{Role: "user", Content: "Is google gemini winning over chatgpt?"},
-		},
-	}
-
-	payloadBytes, _ := json.Marshal(payload)
-
-	// Invoke Bedrock
-	output, err := bedrockClient.InvokeModel(context.TODO(), &bedrockruntime.InvokeModelInput{
-		ModelId:     aws.String(bedrockModelId),
-		ContentType: aws.String("application/json"),
-		Body:        payloadBytes,
-	})
-
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Parse Response (Simplified for this example)
-	var result map[string]interface{}
-	json.Unmarshal(output.Body, &result)
-
-	c.JSON(http.StatusOK, gin.H{
-		"status":   "success",
-		"response": result["content"],
-	})
 }

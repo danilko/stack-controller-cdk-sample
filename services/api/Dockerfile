@@ -17,11 +17,8 @@ RUN go mod download
 # 2. Install Swag CLI inside this AL2023 environment
 # We add GOBIN to the path so we can run 'swag' immediately
 ENV PATH=$PATH:/root/go/bin
-RUN go install github.com/swaggo/swag/cmd/swag@latest
-
 # Copy source and generate docs
 COPY . .
-RUN swag init
 
 # Build the static binary
 RUN CGO_ENABLED=0 GOOS=linux go build -o main .

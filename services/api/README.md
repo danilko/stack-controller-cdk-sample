@@ -4,10 +4,6 @@
 # build the doc
 # We add GOBIN to the path so we can run 'swag' immediately 
 export PATH=$PATH:$(go env GOPATH)/bin
-go install github.com/swaggo/swag/cmd/swag@latest
-
-# generate docs
-swag init
 
 # Build the static binary
 CGO_ENABLED=0 GOOS=linux go build -o main .
